@@ -2,20 +2,26 @@
 #
 # SPDX-License-Identifier:     BSD 3-Clause
 
+import tkinter
 import webbrowser
+from collections import OrderedDict
+from pathlib import Path
+from tkinter import filedialog
 from typing import Dict, List, Any
 
 import dash
 import numpy as np
 import numpy.typing as npt
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objs as go
 import vaex
-from dash import dcc, Output, Input, State
+from damast.ml.experiments import Experiment
+from damast.core.dataframe import AnnotatedDataFrame
+from dash import dash_table, State
+from dash import dcc, Output, Input
 from dash import html
 
-import tkinter
-from tkinter import filedialog
 
 def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
     """Sort input dataframe by entries in given column"""
@@ -68,8 +74,16 @@ class WebApplication():
                  header: str,
                  server: str = "0.0.0.0", port: str = "8888"):
         self._data = df
-        self._app = dash.Dash(__name__)
+
+        external_scripts = [
+            "https://code.jquery.com/jquery-2.2.4.js"
+        ]
+        self._app = dash.Dash(__name__,
+                              external_scripts=external_scripts,
+                              # Allow to define callbacks on dynamically defined components
+                              suppress_callback_exceptions=False)
         self.app.title = "ML App for the Maritime Domain"
+
         self._port = port
         self._server = server
         self._layout = []
@@ -94,10 +108,60 @@ class WebApplication():
 class AISApp(WebApplication):
     _messages_per_mmsi: vaex.DataFrame
 
+    #: Set available set of model that can be used for prediction
+    _models: Dict[str, Any]
+
+    select_experiment: html.Div
+
     def __init__(self, ais: vaex.DataFrame, port: str = "8888"):
         super().__init__({"ais": ais}, "AIS Anomaly Detection", port=port)
         self._messages_per_mmsi = count_number_of_messages(self._data["ais"])
+
+        self._models = {}
+
         self.callbacks()
+
+        experiment_button = html.Button(children='Pick experiment',
+                                        id='button-select-experiment-directory',
+                                        n_clicks=0,
+                                        style={
+                                            "position": "relative",
+                                            "display": "inline-block",
+                                            "background-color": "white",
+                                            "color": "darkgray",
+                                            "text-align": "center",
+                                            "font-size": "1.2em",
+                                            "width": "100%",
+                                            "border-style": "dashed",
+                                            "border-radius": "5px",
+                                            "border-width": "1px",
+                                            "margin": "10px",
+                                        })
+
+        data_button = html.Button(children='Pick dataset',
+                                  id='button-select-data-directory',
+                                  n_clicks=0,
+                                  style={
+                                      "position": "relative",
+                                      "display": "inline-block",
+                                      "background-color": "white",
+                                      "color": "darkgray",
+                                      "text-align": "center",
+                                      "font-size": "1.2em",
+                                      "width": "100%",
+                                      "border-style": "dashed",
+                                      "border-radius": "5px",
+                                      "border-width": "1px",
+                                      "margin": "10px",
+                                  })
+
+        self.select_experiment = html.Div([
+            experiment_button,
+            # html.Div(dcc.Input(id='input-experiment-directory', type='hidden', value="<experiment folder>")),
+            html.Div(id='select-models'),
+            data_button,
+            html.Div(id='data-preview')
+        ])
 
     def filter_boats_by_mmsi(self, MMSI: List[int]) -> vaex.DataFrame:
         """Filter boats by MMSI identifier"""
@@ -182,11 +246,11 @@ class AISApp(WebApplication):
                 # })
             ])
 
-        @self._app.callback(Output('output-data-upload', 'children'),
-                            Input('upload-data', 'contents'),
-                            State('upload-data', 'filename'),
-                            State('upload-data', 'last_modified'))
-        def update_output(list_of_contents, list_of_names, list_of_dates):
+            # @self._app.callback(Output('output-data-upload', 'children'),
+            #                     Input('upload-data', 'contents'),
+            #                     State('upload-data', 'filename'),
+            #                     State('upload-data', 'last_modified'))
+            # def update_output(list_of_contents, list_of_names, list_of_dates):
             if list_of_contents is not None:
                 children = [
                     parse_contents(c, n, d) for c, n, d in
@@ -194,18 +258,112 @@ class AISApp(WebApplication):
                 return children
 
         @self._app.callback(
-            Output('container-button-basic', 'children'),
-            Input('submit-val', 'n_clicks'),
-            State('input-on-submit', 'value')
+            Output('experiment-model-predict', 'children'),
+            [Input({'component_id': 'model-dropdown'}, 'value')]
         )
-        def update_output(n_clicks, value):
+        def update_model(value):
+            if value in self._models:
+                self._current_model = self._models[value]
+
+            return f"PREDICT: {value}"
+
+        @self._app.callback(
+            [
+                Output('button-select-experiment-directory', 'children'),
+                Output('select-models', 'children'),
+            ],
+            [
+                Input('button-select-experiment-directory', 'n_clicks'),
+                State('button-select-experiment-directory', 'children'),
+                State('select-models', 'children'),
+            ]
+        )
+        def update_model_selection(n_clicks, state_button_children, state_models_children):
+            default_value = state_button_children, ""
+
             if n_clicks > 0:
                 root = tkinter.Tk()
                 root.withdraw()
                 directory = filedialog.askdirectory()
                 root.destroy()
 
-                return f'The input value was {directory} - clicks {n_clicks}'
+                if not isinstance(directory, str):
+                    return state_button_children, state_models_children
+
+                self._models = Experiment.from_directory(directory)
+
+                row_models = []
+                for model_name, keras_model in self._models.items():
+                    row_models.append(model_name)
+
+                data = OrderedDict([
+                    ("Models", row_models)
+                ])
+
+                df = pd.DataFrame(data)
+                table = dash_table.DataTable(
+                    data=df.to_dict('records'),
+                    columns=[{'id': c, 'name': c} for c in df.columns],
+                    # https://dash.plotly.com/datatable/style
+                    style_cell={'textAlign': 'center', 'padding': "5px"},
+                    style_header={'backgroundColor': 'lightgray',
+                                  'color': 'white',
+                                  'fontWeight': 'bold'}
+                )
+                model_dropdown = dash.html.Div(children=[html.H3("Models"),
+                                                         dash.dcc.Dropdown(id={'component_id': "model-dropdown"},
+                                                                           placeholder="Select a model",
+                                                                           multi=False,
+                                                                           options=list(self._models.keys()))],
+                                               style={
+                                                   "display": "inline-block",
+                                                   "width": "100%"
+                                               })
+
+                # self.experiment_button.children = html.H2(Path(directory).stem)
+
+                return Path(directory).stem, model_dropdown
+
+            return default_value
+
+        @self._app.callback(
+            [
+                Output('button-select-data-directory', 'children'),
+                Output('data-preview', 'children'),
+            ],
+            [
+                Input('button-select-data-directory', 'n_clicks'),
+                State('button-select-data-directory', 'children'),
+                State('data-preview', 'children'),
+            ]
+        )
+        def update_data(n_clicks, state_data_button, state_data_preview):
+            if n_clicks > 0:
+                if n_clicks > 0:
+                    root = tkinter.Tk()
+                    root.withdraw()
+                    filename = filedialog.askopenfilename(filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
+                    root.destroy()
+
+                    if not isinstance(filename, str):
+                        return state_data_button, state_data_preview
+
+                    adf = AnnotatedDataFrame.from_file(filename=filename)
+
+                    df = adf[:5].to_pandas_df()
+                    data_preview_table = dash_table.DataTable(
+                        data=df.to_dict('records'),
+                        columns=[{'id': c, 'name': c} for c in df.columns],
+                        # https://dash.plotly.com/datatable/style
+                        style_cell={'textAlign': 'center', 'padding': "5px"},
+                        style_header={'backgroundColor': 'lightgray',
+                                      'color': 'white',
+                                      'fontWeight': 'bold'}
+                    )
+                    data_preview = [html.H3("Data Preview"), data_preview_table]
+                    return Path(filename).name, data_preview
+            else:
+                return state_data_button, state_data_preview
 
     def tab_experiments(self) -> dcc.Tab:
         upload = html.Div([
@@ -231,27 +389,29 @@ class AISApp(WebApplication):
             html.Div(id='output-data-upload'),
         ])
 
-        button = html.Div([
-            html.Div(dcc.Input(id='input-on-submit', type='text')),
-            html.Button('Submit', id='submit-val', n_clicks=0),
-            html.Div(id='container-button-basic',
-                     children='Enter a value and press submit')
-        ])
-
+        # button = html.Div([
+        #    html.Div(
+        #        dcc.Input(id='input-on-submit', type='file', style={"display": "none"})
+        #    ),
+        #    html.Button('Experiment folder', id='set-experiment-folder', n_clicks=0),
+        #    html.Div(id='container-button-basic',
+        #             children='Enter a value and press submit')
+        # ])
 
         return dcc.Tab(label='Experiments', children=[
-            upload,
-            button,
-            dcc.Graph(
-                figure={
-                    'data': [
-                        {'x': [1, 2, 3], 'y': [4, 1, 2],
-                         'type': 'bar', 'name': 'SF'},
-                        {'x': [1, 2, 3], 'y': [2, 4, 5],
-                         'type': 'bar', 'name': u'Montréal'},
-                    ]
-                }
-            )
+            # upload,
+            self.select_experiment,
+            html.Div(id="experiment-model-predict"),
+            # dcc.Graph(
+            #    figure={
+            #        'data': [
+            #            {'x': [1, 2, 3], 'y': [4, 1, 2],
+            #             'type': 'bar', 'name': 'SF'},
+            #            {'x': [1, 2, 3], 'y': [2, 4, 5],
+            #             'type': 'bar', 'name': u'Montréal'},
+            #        ]
+            #    }
+            # )
         ])
 
     def tab_prediction(self) -> dcc.Tab:
