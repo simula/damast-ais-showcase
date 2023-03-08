@@ -6,7 +6,7 @@ import tkinter
 import webbrowser
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 from typing import Dict, List, Any
 
 import dash
@@ -16,11 +16,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objs as go
 import vaex
+import damast
+from damast.core.datarange import CyclicMinMax
+from damast.core.units import units
 from damast.ml.experiments import Experiment
 from damast.core.dataframe import AnnotatedDataFrame
+from damast.core.dataprocessing import DataProcessingPipeline, PipelineElement
+from damast.data_handling.accessors import GroupSequenceAccessor
 from dash import dash_table, State
 from dash import dcc, Output, Input
 from dash import html
+
+from typing import Union
 
 
 def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
@@ -110,6 +117,11 @@ class AISApp(WebApplication):
 
     #: Set available set of model that can be used for prediction
     _models: Dict[str, Any]
+    _pipeline: DataProcessingPipeline
+
+    _current_model: Any
+    _current_data: AnnotatedDataFrame
+    _current_mmsi: int
 
     select_experiment: html.Div
 
@@ -160,7 +172,8 @@ class AISApp(WebApplication):
             # html.Div(dcc.Input(id='input-experiment-directory', type='hidden', value="<experiment folder>")),
             html.Div(id='select-models'),
             data_button,
-            html.Div(id='data-preview')
+            html.Div(id='data-preview'),
+            html.Div(id='prediction-results'),
         ])
 
     def filter_boats_by_mmsi(self, MMSI: List[int]) -> vaex.DataFrame:
@@ -262,10 +275,36 @@ class AISApp(WebApplication):
             [Input({'component_id': 'model-dropdown'}, 'value')]
         )
         def update_model(value):
+            """
+            Set the currently select model internally for further processing
+
+            :param value:
+            :return:
+            """
             if value in self._models:
                 self._current_model = self._models[value]
 
-            return f"PREDICT: {value}"
+                predict_button = html.Button(children=f'Predict with {value}',
+                                             id={'component_id': 'button-predict-with-model'},
+                                             n_clicks=0,
+                                             style={
+                                                 "position": "relative",
+                                                 "display": "inline-block",
+                                                 "background-color": "green",
+                                                 "color": "lightgray",
+                                                 "text-align": "center",
+                                                 "font-size": "1em",
+                                                 "width": "20%",
+                                                 "border-style": "solid",
+                                                 "border-radius": "5px",
+                                                 "border-width": "1px",
+                                                 "margin": "10px",
+                                             })
+                return html.Div(children=[
+                    predict_button
+                ])
+            else:
+                return None
 
         @self._app.callback(
             [
@@ -279,6 +318,13 @@ class AISApp(WebApplication):
             ]
         )
         def update_model_selection(n_clicks, state_button_children, state_models_children):
+            """
+            All to select one of the available model from a dropdown list
+            :param n_clicks:
+            :param state_button_children:
+            :param state_models_children:
+            :return:
+            """
             default_value = state_button_children, ""
 
             if n_clicks > 0:
@@ -291,6 +337,7 @@ class AISApp(WebApplication):
                     return state_button_children, state_models_children
 
                 self._models = Experiment.from_directory(directory)
+                self._pipeline = DataProcessingPipeline.load(dir=directory)
 
                 row_models = []
                 for model_name, keras_model in self._models.items():
@@ -322,9 +369,19 @@ class AISApp(WebApplication):
 
                 # self.experiment_button.children = html.H2(Path(directory).stem)
 
-                return Path(directory).stem, model_dropdown
+                return Path(directory).stem, [model_dropdown, html.Div(id={'component_id': 'mmsi-selection'})]
 
             return default_value
+
+        @self._app.callback(
+            Output({'component_id': 'mmsi-selection'}, 'children'),
+            Input({'component_id': 'select-mmsi-dropdown'}, 'value')
+        )
+        def select_mmsi(value):
+            if value is not None:
+                self._current_mmsi = int(value)
+
+            return None
 
         @self._app.callback(
             [
@@ -338,19 +395,28 @@ class AISApp(WebApplication):
             ]
         )
         def update_data(n_clicks, state_data_button, state_data_preview):
+            """
+            Set the current data that shall be used for prediction
+
+            :param n_clicks:
+            :param state_data_button:
+            :param state_data_preview:
+            :return:
+            """
             if n_clicks > 0:
                 if n_clicks > 0:
                     root = tkinter.Tk()
                     root.withdraw()
-                    filename = filedialog.askopenfilename(filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
+                    filename = filedialog.askopenfilename(title="Select data files",
+                                                          filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
                     root.destroy()
 
                     if not isinstance(filename, str):
                         return state_data_button, state_data_preview
 
-                    adf = AnnotatedDataFrame.from_file(filename=filename)
+                    self._current_data = AnnotatedDataFrame.from_file(filename=filename)
 
-                    df = adf[:5].to_pandas_df()
+                    df = self._current_data[:5].to_pandas_df()
                     data_preview_table = dash_table.DataTable(
                         data=df.to_dict('records'),
                         columns=[{'id': c, 'name': c} for c in df.columns],
@@ -360,10 +426,93 @@ class AISApp(WebApplication):
                                       'color': 'white',
                                       'fontWeight': 'bold'}
                     )
-                    data_preview = [html.H3("Data Preview"), data_preview_table]
+                    select_mmsi_dropdown = dcc.Dropdown(
+                        placeholder="Select MSSI for prediction",
+                        id={'component_id': "select-mmsi-dropdown"},
+                        multi=False,
+                    )
+                    if "mmsi" in df.columns:
+                        select_mmsi_dropdown.options = self._current_data.mmsi.unique()
+                    else:
+                        print("No column 'mmsi' in the dataframe - did you select the right data?")
+
+                    data_preview = [html.H3("Data Preview"), data_preview_table, select_mmsi_dropdown]
                     return Path(filename).name, data_preview
             else:
                 return state_data_button, state_data_preview
+
+        @self._app.callback(
+            Output('prediction-results', 'children'),
+            Input({'component_id': 'button-predict-with-model'}, 'n_clicks'),
+            State('prediction-results', 'children')
+        )
+        def predict_with_model(n_clicks, state_prediction_results):
+            if n_clicks > 0 and self._current_model is not None:
+
+                # 1. Get all mmsi based data from the dataframe
+                # 2. Allow to pick from an mmsi
+                # 3. Predict on the full timeline of the mmsi, and graph the prediction errors for the timeline of
+                #    that individual vessel
+
+                if self._current_mmsi is None:
+                    return
+
+                adf = self._current_data
+                prepared_df = self._pipeline.transform(df=adf)
+
+                print("Loading dataframe")
+                df = prepared_df[prepared_df.mmsi == self._current_mmsi]
+                if df.count() < 51:
+                    print(f"MMSI is too short/has insufficient length")
+                    # RUN PREDICTION AND PRESENT THE RESULT -- ASYNC
+                    return state_prediction_results
+
+                print("Creating sequence")
+                sta = GroupSequenceAccessor(df=df,
+                                            group_column="mmsi")
+
+                features = ["latitude_x", "longitude_x",
+                            "latitude_y", "longitude_y"]
+
+                # Generate a sequence of lenght + the indended forecasted values
+                gen_predict = sta.to_keras_generator(features=features,
+                                                     target=features,
+                                                     sequence_length=50,
+                                                     groups=[self._current_mmsi],
+                                                     batch_size=1,
+                                                     random_start_index=False,
+                                                     infinite=True)
+
+                loss = []
+                timepoints = []
+                timepoint = 0
+                print("Running forecast")
+                while True:
+                    data = next(gen_predict)
+                    if data is None:
+                        break
+
+                    X, y = data
+                    predicted_sequence = self._current_model.predict(X, steps=1)
+
+                    actual_sequence = y
+                    computed_loss = float(self._current_model.loss(actual_sequence, predicted_sequence[0])[0])
+                    loss.append(computed_loss)
+                    timepoints.append(timepoint)
+
+                    timepoint += 1
+
+                    if timepoint > 100:
+                        break
+
+                data = zip(timepoints, loss)
+                df = pd.DataFrame(data=data, columns=["timepoint", "loss"])
+                fig = px.scatter(df, x="timepoint", y="loss", title="Forecast loss",
+                                 range_y=[0, 1])
+
+                return dcc.Graph(figure=fig)
+
+            return state_prediction_results
 
     def tab_experiments(self) -> dcc.Tab:
         upload = html.Div([

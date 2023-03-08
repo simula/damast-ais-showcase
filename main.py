@@ -3,10 +3,76 @@
 # SPDX-License-Identifier:     BSD 3-Clause
 
 import argparse
-import pathlib
+from pathlib import Path
+from typing import Union
+
 
 import vaex
 from web_application import AISApp
+
+import damast
+from damast.core.datarange import CyclicMinMax
+from damast.core.units import units
+from damast.core.dataframe import AnnotatedDataFrame
+from damast.core.dataprocessing import DataProcessingPipeline, PipelineElement
+
+class HDF5Export(PipelineElement):
+    filename: Path = None
+
+    def __init__(self, filename: Union[str, Path]):
+        super().__init__()
+        self.filename = Path(filename)
+
+    @damast.core.input({})
+    @damast.core.artifacts({
+        "hdf5_export": "*.hdf5"
+    })
+    def transform(self, df: AnnotatedDataFrame) -> AnnotatedDataFrame:
+        df.save(filename=self.parent_pipeline.base_dir / self.filename)
+        return df
+
+
+class LatLonFilter(PipelineElement):
+    @damast.core.describe("Filter lat/lon to valid range")
+    @damast.core.input({
+        "lat": {"unit": units.deg},
+        "lon": {"unit": units.deg}
+    })
+    @damast.core.output({
+        "latitude": {"unit": units.deg, "value_range": CyclicMinMax(-90.0, 90.0)},
+        "longitude": {"unit": units.deg, "value_range": CyclicMinMax(-180.0, 180.0)}
+    })
+    def transform(self, df: AnnotatedDataFrame) -> AnnotatedDataFrame:
+        df["latitude"] = df["lat"]
+        df._dataframe = df.filter(df.latitude >= -90.0).filter(df.latitude <= 90.0)
+
+        df["longitude"] = df["lon"]
+        df._dataframe = df.filter(df.longitude >= -180.0).filter(df.longitude <= 180.0)
+        return df
+
+
+class LatLonTransformer(PipelineElement):
+    @damast.core.describe("Lat/Lon cyclic transformation")
+    @damast.core.input({
+        "latitude": {"unit": units.deg, "value_range": CyclicMinMax(-90.0, 90.0)},
+        "longitude": {"unit": units.deg, "value_range": CyclicMinMax(-180.0, 180.0)}
+    })
+    @damast.core.output({
+        "latitude_x": {"unit": units.deg},
+        "latitude_y": {"unit": units.deg},
+        "longitude_x": {"unit": units.deg},
+        "longitude_y": {"unit": units.deg}
+    })
+    def transform(self, df: AnnotatedDataFrame) -> AnnotatedDataFrame:
+        lat_cyclic_transformer = vaex.ml.CycleTransformer(features=["latitude"], n=180.0)
+        lon_cyclic_transformer = vaex.ml.CycleTransformer(features=["longitude"], n=360.0)
+
+        _df = lat_cyclic_transformer.fit_transform(df=df)
+        _df = lon_cyclic_transformer.fit_transform(df=_df)
+        df._dataframe = _df
+        return df
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -18,8 +84,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # We start by opening the DataFrame used in the application
-    path = pathlib.Path(args.csv_file)
-    mmsi_path = pathlib.Path(args.mmsi_file)
+    path = Path(args.csv_file)
+    mmsi_path = Path(args.mmsi_file)
     if path.suffix == ".csv":
         vaex_df = vaex.read_csv(path, delimiter=args.delimiter)
     elif path.suffix == ".hdf5":
