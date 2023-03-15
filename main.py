@@ -6,15 +6,15 @@ import argparse
 from pathlib import Path
 from typing import Union
 
-
-import vaex
-from web_application import AISApp
-
 import damast
+import vaex
+from damast.core.dataframe import AnnotatedDataFrame
+from damast.core.dataprocessing import PipelineElement
 from damast.core.datarange import CyclicMinMax
 from damast.core.units import units
-from damast.core.dataframe import AnnotatedDataFrame
-from damast.core.dataprocessing import DataProcessingPipeline, PipelineElement
+
+from web_application import AISApp
+
 
 class HDF5Export(PipelineElement):
     filename: Path = None
@@ -71,7 +71,6 @@ class LatLonTransformer(PipelineElement):
         _df = lon_cyclic_transformer.fit_transform(df=_df)
         df._dataframe = _df
         return df
-
 
 
 if __name__ == "__main__":

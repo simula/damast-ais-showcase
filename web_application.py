@@ -1,34 +1,41 @@
 # Copyright (C) 2023 Jørgen S. Dokken
 #
 # SPDX-License-Identifier:     BSD 3-Clause
-
+import base64
+import datetime
+import json
+import multiprocessing
+import os
+import socket
+import tempfile
 import tkinter
 import webbrowser
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import filedialog, ttk
+from time import sleep
+from timeit import default_timer as timer
+from tkinter import filedialog
 from typing import Dict, List, Any
 
 import dash
+import diskcache
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objs as go
 import vaex
-import damast
-from damast.core.datarange import CyclicMinMax
-from damast.core.units import units
-from damast.ml.experiments import Experiment
 from damast.core.dataframe import AnnotatedDataFrame
-from damast.core.dataprocessing import DataProcessingPipeline, PipelineElement
-from damast.data_handling.accessors import GroupSequenceAccessor
-from dash import dash_table, State
+from damast.core.dataprocessing import DataProcessingPipeline
+from damast.data_handling.accessors import SequenceIterator
+from damast.ml.experiments import Experiment
+from damast.ml.scheduler import JobScheduler, Job
+from dash import dash_table, State, DiskcacheManager
 from dash import dcc, Output, Input
 from dash import html
 
-from typing import Union
-
+cache = diskcache.Cache("./cache")
+background_callback_manager = DiskcacheManager(cache)
 
 def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
     """Sort input dataframe by entries in given column"""
@@ -88,7 +95,8 @@ class WebApplication():
         self._app = dash.Dash(__name__,
                               external_scripts=external_scripts,
                               # Allow to define callbacks on dynamically defined components
-                              suppress_callback_exceptions=False)
+                              suppress_callback_exceptions=False,
+                              )
         self.app.title = "ML App for the Maritime Domain"
 
         self._port = port
@@ -119,9 +127,16 @@ class AISApp(WebApplication):
     _models: Dict[str, Any]
     _pipeline: DataProcessingPipeline
 
+    _experiment_folder: Path
+
+    _current_model_name: str
     _current_model: Any
     _current_data: AnnotatedDataFrame
     _current_mmsi: int
+
+    _job_scheduler: JobScheduler
+
+    _log_messages: List[str]
 
     select_experiment: html.Div
 
@@ -129,7 +144,11 @@ class AISApp(WebApplication):
         super().__init__({"ais": ais}, "AIS Anomaly Detection", port=port)
         self._messages_per_mmsi = count_number_of_messages(self._data["ais"])
 
+        self._experiment_folder = None
         self._models = {}
+        self._log_messages = []
+
+        self._job_scheduler = JobScheduler()
 
         self.callbacks()
 
@@ -139,14 +158,14 @@ class AISApp(WebApplication):
                                         style={
                                             "position": "relative",
                                             "display": "inline-block",
-                                            "background-color": "white",
+                                            "backgroundColor": "white",
                                             "color": "darkgray",
-                                            "text-align": "center",
-                                            "font-size": "1.2em",
+                                            "textAlign": "center",
+                                            "fontSize": "1.2em",
                                             "width": "100%",
-                                            "border-style": "dashed",
-                                            "border-radius": "5px",
-                                            "border-width": "1px",
+                                            "borderStyle": "dashed",
+                                            "borderRadius": "5px",
+                                            "borderWidth": "1px",
                                             "margin": "10px",
                                         })
 
@@ -156,14 +175,14 @@ class AISApp(WebApplication):
                                   style={
                                       "position": "relative",
                                       "display": "inline-block",
-                                      "background-color": "white",
+                                      "backgroundColor": "white",
                                       "color": "darkgray",
-                                      "text-align": "center",
-                                      "font-size": "1.2em",
+                                      "textAlign": "center",
+                                      "fontSize": "1.2em",
                                       "width": "100%",
-                                      "border-style": "dashed",
-                                      "border-radius": "5px",
-                                      "border-width": "1px",
+                                      "borderStyle": "dashed",
+                                      "borderRadius": "5px",
+                                      "borderWidth": "1px",
                                       "margin": "10px",
                                   })
 
@@ -173,8 +192,12 @@ class AISApp(WebApplication):
             html.Div(id='select-models'),
             data_button,
             html.Div(id='data-preview'),
-            html.Div(id='prediction-results'),
+            html.Div(id='prediction-results')
         ])
+
+    def log(self, message: str):
+        timestamp = datetime.datetime.utcnow()
+        self._log_messages.append((timestamp, message))
 
     def filter_boats_by_mmsi(self, MMSI: List[int]) -> vaex.DataFrame:
         """Filter boats by MMSI identifier"""
@@ -194,7 +217,7 @@ class AISApp(WebApplication):
         messages = int(transform_value(min_messages))
         min_message_boats = self._messages_per_mmsi[self._messages_per_mmsi["count"]
                                                     >= messages]["mmsi"]
-        return min_message_boats.unique()
+        return sorted(min_message_boats.unique())
 
     def update_map(self, boat_ids: List[np.int32]) -> go.Figure:
         """
@@ -219,8 +242,8 @@ class AISApp(WebApplication):
         self._app.callback(dash.dependencies.Output("dropdown", "options"),
                            dash.dependencies.Input("num_messages", "value"))(self.boats_with_min_messages)
 
-        # self._app.callback(dash.dependencies.Output("plot_map", "figure"),
-        #                   dash.dependencies.Input("dropdown", "value"), prevent_initial_call=True)(self.update_map)
+        self._app.callback(dash.dependencies.Output("plot_map", "figure"),
+                           dash.dependencies.Input("dropdown", "value"), prevent_initial_call=True)(self.update_map)
 
         def parse_contents(contents, filename, date):
             content_type, content_string = contents.split(',')
@@ -282,6 +305,7 @@ class AISApp(WebApplication):
             :return:
             """
             if value in self._models:
+                self._current_model_name = value
                 self._current_model = self._models[value]
 
                 predict_button = html.Button(children=f'Predict with {value}',
@@ -290,14 +314,14 @@ class AISApp(WebApplication):
                                              style={
                                                  "position": "relative",
                                                  "display": "inline-block",
-                                                 "background-color": "green",
+                                                 "backgroundColor": "green",
                                                  "color": "lightgray",
-                                                 "text-align": "center",
-                                                 "font-size": "1em",
+                                                 "textAlign": "center",
+                                                 "fontSize": "1em",
                                                  "width": "20%",
-                                                 "border-style": "solid",
-                                                 "border-radius": "5px",
-                                                 "border-width": "1px",
+                                                 "borderStyle": "solid",
+                                                 "borderRadius": "5px",
+                                                 "borderWidth": "1px",
                                                  "margin": "10px",
                                              })
                 return html.Div(children=[
@@ -336,8 +360,10 @@ class AISApp(WebApplication):
                 if not isinstance(directory, str):
                     return state_button_children, state_models_children
 
+                self._experiment_folder = Path(directory)
+
+                self.log(message=f"Loading Experiment from {directory}")
                 self._models = Experiment.from_directory(directory)
-                self._pipeline = DataProcessingPipeline.load(dir=directory)
 
                 row_models = []
                 for model_name, keras_model in self._models.items():
@@ -374,13 +400,37 @@ class AISApp(WebApplication):
             return default_value
 
         @self._app.callback(
-            Output({'component_id': 'mmsi-selection'}, 'children'),
-            Input({'component_id': 'select-mmsi-dropdown'}, 'value')
+            Output({'component_id': 'mmsi-stats'}, 'children'),
+            Input({'component_id': 'select-mmsi-dropdown'}, 'value'),
+            State({'component_id': 'mmsi-selection'}, 'children')
         )
-        def select_mmsi(value):
+        def select_mmsi(value, dropdown_mmsi_selection):
             if value is not None:
                 self._current_mmsi = int(value)
 
+                df_stats = self._current_data[self._current_data.mmsi == self._current_mmsi]
+                mean_lat = df_stats.mean("lat")
+                mean_lon = df_stats.mean("lon")
+                var_lat = df_stats.var("lat")
+                var_lon = df_stats.var("lon")
+                length = df_stats.count()
+
+                data = {"Length": length,
+                        "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
+                        "Lon": f"{mean_lon:.2f} +/- {var_lon:.3f}"
+                        }
+
+                mmsi_stats_table = dash_table.DataTable(
+                    data=[data],
+                    columns=[{'id': c, 'name': c} for c in data.keys()],
+                    # https://dash.plotly.com/datatable/style
+                    style_cell={'textAlign': 'center', 'padding': "5px"},
+                    style_header={'backgroundColor': 'lightgray',
+                                  'color': 'white',
+                                  'fontWeight': 'bold'}
+                )
+
+                return mmsi_stats_table
             return None
 
         @self._app.callback(
@@ -432,87 +482,153 @@ class AISApp(WebApplication):
                         multi=False,
                     )
                     if "mmsi" in df.columns:
-                        select_mmsi_dropdown.options = self._current_data.mmsi.unique()
+                        select_mmsi_dropdown.options = sorted(self._current_data.mmsi.unique())
                     else:
-                        print("No column 'mmsi' in the dataframe - did you select the right data?")
+                        self.log("No column 'mmsi' in the dataframe - did you select the right data?")
 
-                    data_preview = [html.H3("Data Preview"), data_preview_table, select_mmsi_dropdown]
+                    data_preview = [
+                        html.H3("Data Preview"),
+                        data_preview_table,
+                        html.H3("Select Vessel by MMSI"),
+                        select_mmsi_dropdown,
+                        html.Div(id={"component_id": "mmsi-stats"})
+                    ]
                     return Path(filename).name, data_preview
             else:
                 return state_data_button, state_data_preview
 
         @self._app.callback(
-            Output('prediction-results', 'children'),
-            Input({'component_id': 'button-predict-with-model'}, 'n_clicks'),
-            State('prediction-results', 'children')
+            [
+                Output('prediction-job', 'data'),
+                Output({'component_id': 'button-predict-with-model'}, 'children'),
+                Output({'component_id': 'button-predict-with-model'}, 'style')
+            ],
+            [
+                Input({'component_id': 'button-predict-with-model'}, 'n_clicks'),
+                State({'component_id': 'button-predict-with-model'}, 'children'),
+                State({'component_id': 'button-predict-with-model'}, 'style'),
+                State('prediction-job', 'data')
+            ]
         )
-        def predict_with_model(n_clicks, state_prediction_results):
-            if n_clicks > 0 and self._current_model is not None:
+        def predict_with_model(n_clicks, button_label, button_style, predict_job):
+            if button_label.startswith("Cancel") and n_clicks > 0:
+                job_dict = json.loads(predict_job)
+                self._job_scheduler.stop(job_dict["id"])
+                style = button_style
+                style["backgroundColor"] = "green"
+                return json.dumps(None), f"Predict with {self._current_model_name}",  style
+            elif n_clicks > 0 and self._current_model is not None:
 
                 # 1. Get all mmsi based data from the dataframe
                 # 2. Allow to pick from an mmsi
-                # 3. Predict on the full timeline of the mmsi, and graph the prediction errors for the timeline of
-                #    that individual vessel
-
+                # 3. Create a job to request the prediction
                 if self._current_mmsi is None:
-                    return
+                    return json.dumps(None), button_label, button_style
 
+                start_time = timer()
                 adf = self._current_data
-                prepared_df = self._pipeline.transform(df=adf)
 
-                print("Loading dataframe")
+                # self._pipeline = DataProcessingPipeline.load(dir=self._experiment_folder)
+                # prepared_df = self._pipeline.transform(df=adf)
+                self.log("predict: load and apply state to dataframe")
+                DataProcessingPipeline.load_state(df=adf, dir=self._experiment_folder)
+                prepared_df = adf._dataframe
+
+                self.log("predict: loading dataframe and converting to pandas")
                 df = prepared_df[prepared_df.mmsi == self._current_mmsi]
                 if df.count() < 51:
-                    print(f"MMSI is too short/has insufficient length")
+                    self.log(f"MMSI is too short/has insufficient length")
                     # RUN PREDICTION AND PRESENT THE RESULT -- ASYNC
-                    return state_prediction_results
+                    return json.dumps(None), button_label, button_style
 
-                print("Creating sequence")
-                sta = GroupSequenceAccessor(df=df,
-                                            group_column="mmsi")
+                dash.callback_context.record_timing('predict:prepare', timer() - start_time, 'pipeline: transform data')
+
+                self.log("predict: preparing prediction job")
+                tmpdir = tempfile.mkdtemp(prefix='.damast-ais-showcase.')
+                tmpfile = Path(tmpdir) / f"mmsi-{self._current_mmsi}.hdf5"
+                df.export(tmpfile)
+                self.log(f"df: exported to {tmpfile}")
+                if not tmpfile.exists():
+                    raise FileNotFoundError("Failed to create temporary data file")
 
                 features = ["latitude_x", "longitude_x",
                             "latitude_y", "longitude_y"]
 
-                # Generate a sequence of lenght + the indended forecasted values
-                gen_predict = sta.to_keras_generator(features=features,
-                                                     target=features,
-                                                     sequence_length=50,
-                                                     groups=[self._current_mmsi],
-                                                     batch_size=1,
-                                                     random_start_index=False,
-                                                     infinite=True)
+                job = Job(
+                    id=0,
+                    experiment_dir=str(self._experiment_folder),
+                    model_name=self._current_model_name,
+                    features=features,
+                    target=features,
+                    sequence_length=50,
+                    data_filename=str(tmpfile)
+                )
 
-                loss = []
-                timepoints = []
-                timepoint = 0
-                print("Running forecast")
-                while True:
-                    data = next(gen_predict)
-                    if data is None:
-                        break
+                self._job_scheduler.start(job)
 
-                    X, y = data
-                    predicted_sequence = self._current_model.predict(X, steps=1)
+                style = button_style
+                style["backgroundColor"] = "red"
+                return json.dumps(job.__dict__), f"Cancel (job id: {job.id})", button_style
 
-                    actual_sequence = y
-                    computed_loss = float(self._current_model.loss(actual_sequence, predicted_sequence[0])[0])
-                    loss.append(computed_loss)
-                    timepoints.append(timepoint)
+            return json.dumps(None), button_label, button_style
 
-                    timepoint += 1
+        @self._app.callback(
+            [
+                Output('prediction-results', 'children'),
+                Output('logging-console', 'children')
+            ],
+            [
+                Input('logging-console-interval', 'n_intervals'),
+                State('prediction-job', 'data')
+            ]
+        )
+        def log_content(log_interval, prediction_job_data):
+            prediction_result = None
+            if prediction_job_data is not None:
+                json_data = json.loads(prediction_job_data)
+                if json_data is not None:
+                    job_id = json_data["id"]
+                    responses, status = self._job_scheduler.get_status(job_id)
 
-                    if timepoint > 100:
-                        break
+                    timepoints = []
+                    losses = []
+                    for response in responses:
+                        timepoints.append(response.timepoint)
+                        losses.append(response.loss)
 
-                data = zip(timepoints, loss)
-                df = pd.DataFrame(data=data, columns=["timepoint", "loss"])
-                fig = px.scatter(df, x="timepoint", y="loss", title="Forecast loss",
-                                 range_y=[0, 1])
+                    data = zip(timepoints, losses)
+                    df = pd.DataFrame(data=data, columns=["timepoint", "loss"])
+                    fig = px.scatter(df, x="timepoint", y="loss", title="Forecast loss",
+                                     range_y=[0, 1])
 
-                return dcc.Graph(figure=fig)
+                    prediction_result = dcc.Graph(figure=fig)
 
-            return state_prediction_results
+            # take in the messages through some function
+            log_entries = []
+            for timestamp, msg in self._log_messages:
+                log_entries.append(html.Tr(children=[
+                    html.Td(timestamp.strftime("%Y%m%d-%H%M%S")),
+                    html.Td(msg)])
+                )
+
+            logging_table = html.Table(title="Logging Console",
+                                       children=[
+                                           html.Thead(
+                                               children=[
+                                                   html.Tr(
+                                                       children=[
+                                                           html.Th("timestamp"),
+                                                           html.Th("message"),
+                                                       ]
+                                                   )
+                                               ]
+                                           ),
+                                           html.Tbody(
+                                               children=log_entries
+                                           )
+                                       ]
+                                       )
+            return prediction_result, [html.H3("Logging Console"), logging_table]
 
     def tab_experiments(self) -> dcc.Tab:
         upload = html.Div([
@@ -551,16 +667,20 @@ class AISApp(WebApplication):
             # upload,
             self.select_experiment,
             html.Div(id="experiment-model-predict"),
-            # dcc.Graph(
-            #    figure={
-            #        'data': [
-            #            {'x': [1, 2, 3], 'y': [4, 1, 2],
-            #             'type': 'bar', 'name': 'SF'},
-            #            {'x': [1, 2, 3], 'y': [2, 4, 5],
-            #             'type': 'bar', 'name': u'Montréal'},
-            #        ]
-            #    }
-            # )
+            html.Div(id='logging-console',
+                     children=[html.H3("Logging Console")],
+                     style={
+                         'background': 'lightyellow',
+                         'borderStyle': 'solid',
+                         'borderRadius': '5px',
+                         'borderWidth': '1px',
+                         'height': '300px',
+                         'overflow': 'auto'
+                     }),
+            # Create an interval for which the logging console is updated
+            dcc.Interval("logging-console-interval", interval=1000),
+            # A store to trigger the prediction background job
+            dcc.Store(id='prediction-job', storage_type="session"),
         ])
 
     def tab_prediction(self) -> dcc.Tab:
