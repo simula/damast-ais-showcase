@@ -190,8 +190,6 @@ class AISApp(WebApplication):
             html.Div(id='select-models'),
             data_button,
             html.Div(id='data-preview'),
-            html.Div(id='prediction-trigger'),
-            html.Div(id='prediction-results')
         ])
 
     def log(self, message: str):
@@ -256,10 +254,11 @@ class AISApp(WebApplication):
                 style["backgroundColor"] = "red"
                 return f"Cancel - Predict with {model_name}", style, False
             else:
-                style["backgroundColor"] = "green"
                 if model_name is not None:
+                    style["backgroundColor"] = "green"
                     return f"Predict with {model_name}", style, False
                 else:
+                    style["backgroundColor"] = "gray"
                     return "Predict", style, True
 
         @self._app.callback(
@@ -388,18 +387,20 @@ class AISApp(WebApplication):
             [
                 Output('button-select-data-directory', 'children'),
                 Output('data-preview', 'children'),
+                Output('prediction-mmsi-selection', 'children'),
                 Output('data-filename', 'data'),
                 Output('mmsi', 'clear_data')
             ],
             [
                 Input('button-select-data-directory', 'n_clicks'),
                 State('button-select-data-directory', 'children'),
+                State('prediction-mmsi-selection', 'children'),
                 State('data-preview', 'children'),
                 State('data-filename', 'data'),
             ],
             prevent_initial_callbacks=True
         )
-        def update_data(n_clicks, state_data_button, state_data_preview, state_data_filename):
+        def update_data(n_clicks, state_data_button, state_prediction_mmsi_selection, state_data_preview, state_data_filename):
             """
             Set the current data that shall be used for prediction
 
@@ -426,7 +427,7 @@ class AISApp(WebApplication):
                 filename = state_data_filename
 
             if filename is None or not isinstance(filename, str):
-                return state_data_button, state_data_preview, state_data_filename, False
+                return state_data_button, state_data_preview, state_prediction_mmsi_selection, state_data_filename, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             df = adf[:5].to_pandas_df()
@@ -461,7 +462,10 @@ class AISApp(WebApplication):
 
             data_preview = [
                 html.H3("Data Preview"),
-                data_preview_table,
+                data_preview_table
+            ]
+
+            select_for_prediction = [
                 html.H2("Select Vessel"),
                 html.Div(id="mmsi-filter", children=[
                     html.H3("Minimum sequence length"),
@@ -471,7 +475,7 @@ class AISApp(WebApplication):
                 select_mmsi_dropdown,
                 html.Div(id={"component_id": "mmsi-stats"})
             ]
-            return Path(filename).name, data_preview, filename, True
+            return Path(filename).name, data_preview, select_for_prediction, filename, True
 
         @self._app.callback(
             Output('prediction-job', 'data'),
@@ -710,20 +714,10 @@ class AISApp(WebApplication):
         return dcc.Tab(label='Predict',
                        value="tab-predict",
                        children=[
-                           # upload,
-                           self.select_experiment,
-                           html.Div(id='logging-console',
-                                    children=[html.H3("Logging Console"),
-                                              html.Button("Hide", id={'component_id': 'button-logging-console'},
-                                                          n_clicks=0)],
-                                    style={
-                                        "position": "fixed",
-                                        "bottom": 0,
-                                        "width": "100%"
-                                    }),
-                           # Create an interval from which regular updates are trigger, e.g.,
-                           # the logging console is updated - interval is set in milliseconds
-                           dcc.Interval("update-interval", interval=1000),
+                           html.Div(id='prediction-mmsi-selection'),
+                           html.Div(id='prediction-trigger'),
+                           html.Div(id='prediction-results'),
+
                            dcc.Store(id='experiment-directory', storage_type='session'),
                            dcc.Store(id='data-filename', storage_type="session"),
                            dcc.Store(id='model-name', storage_type="session"),
@@ -733,10 +727,6 @@ class AISApp(WebApplication):
                            dcc.Store(id='prediction-job', storage_type="session"),
                            dcc.Store(id='prediction-thread-status', storage_type="session"),
 
-                           # Control showing of control
-                           dcc.Store(id='logging-console-display',
-                                     data="hide",
-                                     storage_type="session"),
                        ])
 
     def tab_explore(self) -> dcc.Tab:
@@ -750,6 +740,28 @@ class AISApp(WebApplication):
         """
         self._layout += [
             html.Div([
+                # upload,
+                self.select_experiment,
+                html.Div(id='logging-console',
+                         children=[html.H3("Logging Console"),
+                                   html.Button("Hide", id={'component_id': 'button-logging-console'},
+                                               n_clicks=0)],
+                         style={
+                             "position": "fixed",
+                             "bottom": 0,
+                             "width": "100%"
+                         }),
+                # Create an interval from which regular updates are trigger, e.g.,
+                # the logging console is updated - interval is set in milliseconds
+                dcc.Interval("update-interval", interval=1000),
+                # Control showing of control
+                dcc.Store(id='logging-console-display',
+                          data="hide",
+                          storage_type="session"),
+                html.Div(id="tab-spacer",
+                         style={
+                             "height": "2em"
+                         }),
                 dcc.Tabs([
                     self.tab_explore(),
                     self.tab_predict()
