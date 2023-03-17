@@ -239,6 +239,31 @@ class AISApp(WebApplication):
 
         @self._app.callback(
             [
+                Output({'component_id': 'button-predict-with-model'}, 'children'),
+                Output({'component_id': 'button-predict-with-model'}, 'style'),
+                Output({'component_id': 'button-predict-with-model'}, 'disabled')
+            ],
+            [
+                Input('prediction-thread-status', 'data'),
+                State('model-name', 'data'),
+                State({'component_id': 'button-predict-with-model'}, 'style')
+            ],
+            prevent_initial_callbacks=True
+        )
+        def update_predict_button(prediction_thread_status, model_name, button_style):
+            style = button_style.copy()
+            if prediction_thread_status == ResponseCollector.Status.RUNNING.value:
+                style["backgroundColor"] = "red"
+                return f"Cancel - Predict with {model_name}", style, False
+            else:
+                style["backgroundColor"] = "green"
+                if model_name is not None:
+                    return f"Predict with {model_name}", style, False
+                else:
+                    return "Predict", style, True
+
+        @self._app.callback(
+            [
                 Output('button-select-experiment-directory', 'children'),
                 Output('experiment-directory', 'data'),
                 Output('select-models', 'children'),
@@ -298,8 +323,8 @@ class AISApp(WebApplication):
                                            })
             return Path(directory).stem, \
                 directory, \
-                [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown],\
-                True # Clear model_name
+                [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown], \
+                True  # Clear model_name
 
         @self._app.callback(
             Output({'component_id': 'select-mmsi-dropdown'}, 'options'),
@@ -391,8 +416,8 @@ class AISApp(WebApplication):
                 root = tkinter.Tk()
                 root.withdraw()
                 result_filename = filedialog.askopenfilename(title="Select data files",
-                                                      initialdir = initial_directory,
-                                                      filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
+                                                             initialdir=initial_directory,
+                                                             filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
                 if isinstance(result_filename, str):
                     filename = result_filename
 
@@ -449,11 +474,7 @@ class AISApp(WebApplication):
             return Path(filename).name, data_preview, filename, True
 
         @self._app.callback(
-            [
-                Output('prediction-job', 'data'),
-                Output({'component_id': 'button-predict-with-model'}, 'children'),
-                Output({'component_id': 'button-predict-with-model'}, 'style')
-            ],
+            Output('prediction-job', 'data'),
             [
                 Input({'component_id': 'button-predict-with-model'}, 'n_clicks'),
                 State({'component_id': 'button-predict-with-model'}, 'children'),
@@ -485,24 +506,20 @@ class AISApp(WebApplication):
             :param predict_job:
             :return:
             """
-            if button_label.startswith("Cancel"):
-                # When the button holds the label cancel, a prediction has been triggered
-                # but if the actual corresponding thread is not running anymore, the
-                # button should switch back to the default anyway
-                thread_status = json.loads(prediction_thread_status)
-                if thread_status == ResponseCollector.Status.RUNNING.value:
-                    job_dict = json.loads(predict_job)
-                    self._job_scheduler.stop(job_dict["id"])
+            if n_clicks <= 0:
+                return predict_job
 
-                style = button_style
-                style["backgroundColor"] = "green"
-                return json.dumps(None), f"Predict with {model_name}", style
+            # When the button holds the label cancel, a prediction has been triggered
+            # but if the actual corresponding thread is not running anymore, the
+            # button should switch back to the default anyway
+            if prediction_thread_status == ResponseCollector.Status.RUNNING.value:
+                job_dict = json.loads(predict_job)
+                self._job_scheduler.stop(job_dict["id"])
+                return predict_job
 
             # If mmsi is not set - there is no need to trigger the prediction
             if mmsi is None:
-                style = button_style
-                style["backgroundColor"] = "green"
-                return predict_job, f"Predict with {model_name}", style
+                return predict_job
 
             current_mmsi = json.loads(mmsi)
 
@@ -521,9 +538,9 @@ class AISApp(WebApplication):
                 self.log("predict: loading dataframe and converting to pandas")
                 df = prepared_df[prepared_df.mmsi == current_mmsi]
                 if df.count() < 51:
-                    self.log(f"Data fro MMSI ({current_mmsi}) is too short/has insufficient length")
+                    self.log(f"Data from MMSI ({current_mmsi}) is too short/has insufficient length")
                     # RUN PREDICTION AND PRESENT THE RESULT -- ASYNC
-                    return json.dumps(None), button_label, button_style
+                    return json.dumps(None)
 
                 dash.callback_context.record_timing('predict:prepare', timer() - start_time, 'pipeline: transform data')
 
@@ -561,13 +578,9 @@ class AISApp(WebApplication):
                 )
                 # Start the prediction job
                 self._job_scheduler.start(job)
+                return json.dumps(job.__dict__)
 
-                # Ensure that the use is informed about the running job
-                style = button_style
-                style["backgroundColor"] = "red"
-                return json.dumps(job.__dict__), f"Cancel (job id: {job.id})", button_style
-
-            return json.dumps(None), button_label, button_style
+            return json.dumps(None)
 
         @self._app.callback(
             [
@@ -615,13 +628,14 @@ class AISApp(WebApplication):
             :return:
             """
             prediction_result = None
-            prediction_thread_status = json.dumps(ResponseCollector.Status.NOT_STARTED.value)
+            prediction_thread_status = ResponseCollector.Status.NOT_STARTED.value
             if prediction_job_data is not None:
                 json_data = json.loads(prediction_job_data)
                 if json_data is not None:
                     job_id = json_data["id"]
                     responses, status = self._job_scheduler.get_status(job_id)
-                    prediction_thread_status = json.dumps(status.value)
+                    if status.value != prediction_thread_status:
+                        prediction_thread_status = status.value
 
                     timepoints = []
                     losses = []
@@ -632,7 +646,6 @@ class AISApp(WebApplication):
                     data = zip(timepoints, losses)
                     df = pd.DataFrame(data=data, columns=["timepoint", "loss"])
                     fig = px.scatter(df, x="timepoint", y="loss", title="Forecast loss")
-
 
                     prediction_result = dcc.Graph(figure=fig)
 
@@ -740,7 +753,7 @@ class AISApp(WebApplication):
                 dcc.Tabs([
                     self.tab_explore(),
                     self.tab_predict()
-                    ],
+                ],
                     # Start with the second tab
                     value="tab-predict"
                 )
