@@ -47,7 +47,7 @@ def transform_value(value):
     return 10 ** value
 
 
-def plot_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
+def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by MMSI.
     NOTE: Assumes that the input data is sorted by in time
@@ -59,12 +59,16 @@ def plot_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
                          lat="lat", lon="lon",
                          color="mmsi")
 
-    fig2 = px.density_mapbox(input, lat='lat', lon='lon', z='mmsi', radius=5)
+    fig2 = px.density_mapbox(input,
+                             lat='lat',
+                             lon='lon',
+                             z='mmsi', radius=3)
 
     fig.add_trace(fig2.data[0])
     fig.update_coloraxes(showscale=False)
 
-    fig.update_layout(mapbox_style="open-street-map", mapbox_zoom=4)
+    fig.update_layout(height=1000,
+                      mapbox_style="open-street-map", mapbox_zoom=4)
 
     return fig
 
@@ -186,6 +190,7 @@ class AISApp(WebApplication):
             html.Div(id='select-models'),
             data_button,
             html.Div(id='data-preview'),
+            html.Div(id='prediction-trigger'),
             html.Div(id='prediction-results')
         ])
 
@@ -196,10 +201,11 @@ class AISApp(WebApplication):
     def callbacks(self):
         """Define input/output of the different dash applications
         """
+
         @self._app.callback(
             [
                 Output('model-name', 'data'),
-                Output('experiment-model-predict', 'children')
+                Output('prediction-trigger', 'children')
             ],
             [Input({'component_id': 'model-dropdown'}, 'value')],
             prevent_initial_callbacks=True
@@ -236,12 +242,14 @@ class AISApp(WebApplication):
                 Output('button-select-experiment-directory', 'children'),
                 Output('experiment-directory', 'data'),
                 Output('select-models', 'children'),
+                Output('model-name', 'clear_data'),
             ],
             [
                 Input('button-select-experiment-directory', 'n_clicks'),
                 State('button-select-experiment-directory', 'children'),
                 State('experiment-directory', 'data')
-            ]
+            ],
+            prevent_initial_callbacks=True
         )
         def load_experiment(n_clicks, state_button_children, state_experiment_directory):
             """
@@ -252,38 +260,46 @@ class AISApp(WebApplication):
             :param state_models_children:
             :return:
             """
-            default_value = state_button_children, state_experiment_directory, ""
+            default_value = state_button_children, state_experiment_directory, "", False
 
             if n_clicks > 0:
                 root = tkinter.Tk()
                 root.withdraw()
-                directory = filedialog.askdirectory()
+
+                initial_directory = None
+                if state_experiment_directory is not None:
+                    initial_directory = str(Path(state_experiment_directory).parent)
+
+                result_directory = filedialog.askdirectory(initialdir=initial_directory)
+                if isinstance(result_directory, str):
+                    directory = result_directory
                 root.destroy()
+            else:
+                directory = state_experiment_directory
 
-                if not isinstance(directory, str):
-                    return default_value
+            if directory is None or not isinstance(directory, str):
+                return default_value
 
-                self.log(message=f"Loading Experiment from {directory}")
-                models = Experiment.from_directory(directory)
+            self.log(message=f"Loading Experiment from {directory}")
+            models = Experiment.from_directory(directory)
 
-                row_models = []
-                for model_name, keras_model in models.items():
-                    row_models.append(model_name)
+            row_models = []
+            for model_name, keras_model in models.items():
+                row_models.append(model_name)
 
-                model_dropdown = dash.html.Div(children=[html.H3("Models"),
-                                                         dash.dcc.Dropdown(id={'component_id': "model-dropdown"},
-                                                                           placeholder="Select a model",
-                                                                           multi=False,
-                                                                           options=list(models.keys()))],
-                                               style={
-                                                   "display": "inline-block",
-                                                   "width": "100%"
-                                               })
-                return Path(directory).stem,\
-                    directory, \
-                    [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown]
-
-            return default_value
+            model_dropdown = dash.html.Div(children=[html.H3("Models"),
+                                                     dash.dcc.Dropdown(id={'component_id': "model-dropdown"},
+                                                                       placeholder="Select a model",
+                                                                       multi=False,
+                                                                       options=list(models.keys()))],
+                                           style={
+                                               "display": "inline-block",
+                                               "width": "100%",
+                                           })
+            return Path(directory).stem, \
+                directory, \
+                [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown],\
+                True # Clear model_name
 
         @self._app.callback(
             Output({'component_id': 'select-mmsi-dropdown'}, 'options'),
@@ -292,7 +308,7 @@ class AISApp(WebApplication):
             prevent_initial_callbacks=True
         )
         def filter_mmsi(min_length, data_filename):
-            adf = AnnotatedDataFrame.from_file(json.loads(data_filename))
+            adf = AnnotatedDataFrame.from_file(data_filename)
             messages_per_mmsi = adf.groupby("mmsi", agg="count")
             filtered_mmsi = messages_per_mmsi[messages_per_mmsi["count"] > min_length]
             selectable_mmsis = sorted(filtered_mmsi.mmsi.unique())
@@ -309,7 +325,7 @@ class AISApp(WebApplication):
         def select_mmsi(value, data_filename):
             if value is not None:
                 current_mmsi = int(value)
-                adf = AnnotatedDataFrame.from_file(json.loads(data_filename))
+                adf = AnnotatedDataFrame.from_file(data_filename)
                 mmsi_df = adf[adf.mmsi == current_mmsi]
 
                 mean_lat = mmsi_df.mean("lat")
@@ -334,7 +350,11 @@ class AISApp(WebApplication):
                 )
 
                 trajectory_plot = dash.dcc.Graph(id="mmsi-plot-map",
-                                                 figure=plot_boat_trajectory(mmsi_df))
+                                                 figure=create_figure_boat_trajectory(mmsi_df),
+                                                 style={
+                                                     "width": "100%",
+                                                     "height": "30%"
+                                                 })
 
                 return [mmsi_stats_table, trajectory_plot], json.dumps(value)
             return None, json.dumps(None)
@@ -344,6 +364,7 @@ class AISApp(WebApplication):
                 Output('button-select-data-directory', 'children'),
                 Output('data-preview', 'children'),
                 Output('data-filename', 'data'),
+                Output('mmsi', 'clear_data')
             ],
             [
                 Input('button-select-data-directory', 'n_clicks'),
@@ -362,17 +383,25 @@ class AISApp(WebApplication):
             :param state_data_preview:
             :return:
             """
-            if n_clicks <= 0:
-                return state_data_button, state_data_preview, state_data_filename
+            if n_clicks > 0:
+                initial_directory = str(Path().resolve())
+                if state_data_filename is not None:
+                    initial_directory = str(Path(state_data_filename).parent)
 
-            root = tkinter.Tk()
-            root.withdraw()
-            filename = filedialog.askopenfilename(title="Select data files",
-                                                  filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
-            root.destroy()
+                root = tkinter.Tk()
+                root.withdraw()
+                result_filename = filedialog.askopenfilename(title="Select data files",
+                                                      initialdir = initial_directory,
+                                                      filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
+                if isinstance(result_filename, str):
+                    filename = result_filename
 
-            if not isinstance(filename, str):
-                return state_data_button, state_data_preview, state_data_filename
+                root.destroy()
+            else:
+                filename = state_data_filename
+
+            if filename is None or not isinstance(filename, str):
+                return state_data_button, state_data_preview, state_data_filename, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             df = adf[:5].to_pandas_df()
@@ -393,7 +422,7 @@ class AISApp(WebApplication):
 
             min_messages = 0
             max_messages = 10000
-            #markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
+            # markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
             filter_mmsi_slider = dash.dcc.Slider(id={'component_id': 'filter-mmsi-min-length'},
                                                  min=min_messages, max=max_messages,
                                                  value=50,
@@ -417,7 +446,7 @@ class AISApp(WebApplication):
                 select_mmsi_dropdown,
                 html.Div(id={"component_id": "mmsi-stats"})
             ]
-            return Path(filename).name, data_preview, json.dumps(filename)
+            return Path(filename).name, data_preview, filename, True
 
         @self._app.callback(
             [
@@ -433,7 +462,7 @@ class AISApp(WebApplication):
                 State('prediction-job', 'data'),
                 State('prediction-thread-status', 'data'),
                 State('experiment-directory', 'data'),
-                State('model-name', 'data'), # model_name
+                State('model-name', 'data'),  # model_name
                 State('data-filename', 'data')
             ],
             prevent_initial_callbacks=True
@@ -483,7 +512,7 @@ class AISApp(WebApplication):
                 # 3. Create a job to request the prediction
                 start_time = timer()
 
-                adf = AnnotatedDataFrame.from_file(json.loads(data_filename))
+                adf = AnnotatedDataFrame.from_file(data_filename)
 
                 self.log(f"predict (mmsi: {current_mmsi}): load and apply state to dataframe")
                 DataProcessingPipeline.load_state(df=adf, dir=experiment_directory)
@@ -602,8 +631,8 @@ class AISApp(WebApplication):
 
                     data = zip(timepoints, losses)
                     df = pd.DataFrame(data=data, columns=["timepoint", "loss"])
-                    fig = px.scatter(df, x="timepoint", y="loss", title="Forecast loss",
-                                     range_y=[0, 1])
+                    fig = px.scatter(df, x="timepoint", y="loss", title="Forecast loss")
+
 
                     prediction_result = dcc.Graph(figure=fig)
 
@@ -665,38 +694,41 @@ class AISApp(WebApplication):
             ]
 
     def tab_predict(self) -> dcc.Tab:
-        return dcc.Tab(label='Predict', children=[
-            # upload,
-            self.select_experiment,
-            html.Div(id="experiment-model-predict"),
-            html.Div(id='logging-console',
-                     children=[html.H3("Logging Console"),
-                               html.Button("Hide", id={'component_id': 'button-logging-console'}, n_clicks=0)],
-                     style={
-                         "position": "fixed",
-                         "bottom": 0,
-                         "width": "100%"
-                     }),
-            # Create an interval from which regular updates are trigger, e.g.,
-            # the logging console is updated - interval is set in milliseconds
-            dcc.Interval("update-interval", interval=1000),
-            dcc.Store(id='experiment-directory', storage_type='session'),
-            dcc.Store(id='data-filename', storage_type="session"),
-            dcc.Store(id='model-name', storage_type="session"),
-            dcc.Store(id='mmsi', storage_type='session'),
-            # A store to trigger the prediction background job - with storage type
-            # memory, the data will be cleared with a refresh
-            dcc.Store(id='prediction-job', storage_type="memory"),
-            dcc.Store(id='prediction-thread-status', storage_type="memory"),
+        return dcc.Tab(label='Predict',
+                       value="tab-predict",
+                       children=[
+                           # upload,
+                           self.select_experiment,
+                           html.Div(id='logging-console',
+                                    children=[html.H3("Logging Console"),
+                                              html.Button("Hide", id={'component_id': 'button-logging-console'},
+                                                          n_clicks=0)],
+                                    style={
+                                        "position": "fixed",
+                                        "bottom": 0,
+                                        "width": "100%"
+                                    }),
+                           # Create an interval from which regular updates are trigger, e.g.,
+                           # the logging console is updated - interval is set in milliseconds
+                           dcc.Interval("update-interval", interval=1000),
+                           dcc.Store(id='experiment-directory', storage_type='session'),
+                           dcc.Store(id='data-filename', storage_type="session"),
+                           dcc.Store(id='model-name', storage_type="session"),
+                           dcc.Store(id='mmsi', storage_type='session'),
+                           # A store to trigger the prediction background job - with storage type
+                           # memory, the data will be cleared with a refresh
+                           dcc.Store(id='prediction-job', storage_type="session"),
+                           dcc.Store(id='prediction-thread-status', storage_type="session"),
 
-            # Control showing of control
-            dcc.Store(id='logging-console-display',
-                      data="hide",
-                      storage_type="session"),
-        ])
+                           # Control showing of control
+                           dcc.Store(id='logging-console-display',
+                                     data="hide",
+                                     storage_type="session"),
+                       ])
 
     def tab_explore(self) -> dcc.Tab:
         return dcc.Tab(label="Explore",
+                       value="tab-explore",
                        children=[],
                        className="tab")
 
@@ -708,6 +740,9 @@ class AISApp(WebApplication):
                 dcc.Tabs([
                     self.tab_explore(),
                     self.tab_predict()
-                ])
+                    ],
+                    # Start with the second tab
+                    value="tab-predict"
+                )
             ])
         ]
