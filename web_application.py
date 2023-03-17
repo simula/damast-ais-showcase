@@ -132,7 +132,6 @@ class AISApp(WebApplication):
 
     _current_model_name: str
     _current_model: Any
-    _current_data: AnnotatedDataFrame
 
     _job_scheduler: JobScheduler
 
@@ -142,14 +141,9 @@ class AISApp(WebApplication):
 
     def __init__(self, ais: vaex.DataFrame, port: str = "8888"):
         super().__init__({"ais": ais}, "AIS Anomaly Detection", port=port)
-        self._messages_per_mmsi = count_number_of_messages(self._data["ais"])
 
-        self._experiment_folder = None
-        self._models = {}
         self._log_messages = []
-
         self._job_scheduler = JobScheduler()
-
         self.callbacks()
 
         experiment_button = html.Button(children='Pick experiment',
@@ -203,8 +197,12 @@ class AISApp(WebApplication):
         """Define input/output of the different dash applications
         """
         @self._app.callback(
-            Output('experiment-model-predict', 'children'),
-            [Input({'component_id': 'model-dropdown'}, 'value')]
+            [
+                Output('model-name', 'data'),
+                Output('experiment-model-predict', 'children')
+            ],
+            [Input({'component_id': 'model-dropdown'}, 'value')],
+            prevent_initial_callbacks=True
         )
         def update_model(value):
             """
@@ -213,52 +211,48 @@ class AISApp(WebApplication):
             :param value:
             :return:
             """
-            if value in self._models:
-                self._current_model_name = value
-                self._current_model = self._models[value]
-
-                predict_button = html.Button(children=f'Predict with {value}',
-                                             id={'component_id': 'button-predict-with-model'},
-                                             n_clicks=0,
-                                             style={
-                                                 "position": "relative",
-                                                 "display": "inline-block",
-                                                 "backgroundColor": "green",
-                                                 "color": "lightgray",
-                                                 "textAlign": "center",
-                                                 "fontSize": "1em",
-                                                 "width": "20%",
-                                                 "borderStyle": "solid",
-                                                 "borderRadius": "5px",
-                                                 "borderWidth": "1px",
-                                                 "margin": "10px",
-                                             })
-                return html.Div(children=[
-                    predict_button
-                ])
-            else:
-                return None
+            predict_button = html.Button(children=f'Predict with {value}',
+                                         id={'component_id': 'button-predict-with-model'},
+                                         n_clicks=0,
+                                         style={
+                                             "position": "relative",
+                                             "display": "inline-block",
+                                             "backgroundColor": "green",
+                                             "color": "lightgray",
+                                             "textAlign": "center",
+                                             "fontSize": "1em",
+                                             "width": "20%",
+                                             "borderStyle": "solid",
+                                             "borderRadius": "5px",
+                                             "borderWidth": "1px",
+                                             "margin": "10px",
+                                         })
+            return value, html.Div(children=[
+                predict_button
+            ])
 
         @self._app.callback(
             [
                 Output('button-select-experiment-directory', 'children'),
+                Output('experiment-directory', 'data'),
                 Output('select-models', 'children'),
             ],
             [
                 Input('button-select-experiment-directory', 'n_clicks'),
                 State('button-select-experiment-directory', 'children'),
-                State('select-models', 'children'),
+                State('experiment-directory', 'data')
             ]
         )
-        def update_model_selection(n_clicks, state_button_children, state_models_children):
+        def load_experiment(n_clicks, state_button_children, state_experiment_directory):
             """
-            All to select one of the available model from a dropdown list
+            Allow to select the experiment and populate the available models for the dropdown list.
+
             :param n_clicks:
             :param state_button_children:
             :param state_models_children:
             :return:
             """
-            default_value = state_button_children, ""
+            default_value = state_button_children, state_experiment_directory, ""
 
             if n_clicks > 0:
                 root = tkinter.Tk()
@@ -267,68 +261,57 @@ class AISApp(WebApplication):
                 root.destroy()
 
                 if not isinstance(directory, str):
-                    return state_button_children, state_models_children
-
-                self._experiment_folder = Path(directory)
+                    return default_value
 
                 self.log(message=f"Loading Experiment from {directory}")
-                self._models = Experiment.from_directory(directory)
+                models = Experiment.from_directory(directory)
 
                 row_models = []
-                for model_name, keras_model in self._models.items():
+                for model_name, keras_model in models.items():
                     row_models.append(model_name)
 
-                data = OrderedDict([
-                    ("Models", row_models)
-                ])
-
-                df = pd.DataFrame(data)
-                table = dash_table.DataTable(
-                    data=df.to_dict('records'),
-                    columns=[{'id': c, 'name': c} for c in df.columns],
-                    # https://dash.plotly.com/datatable/style
-                    style_cell={'textAlign': 'center', 'padding': "5px"},
-                    style_header={'backgroundColor': 'lightgray',
-                                  'color': 'white',
-                                  'fontWeight': 'bold'}
-                )
                 model_dropdown = dash.html.Div(children=[html.H3("Models"),
                                                          dash.dcc.Dropdown(id={'component_id': "model-dropdown"},
                                                                            placeholder="Select a model",
                                                                            multi=False,
-                                                                           options=list(self._models.keys()))],
+                                                                           options=list(models.keys()))],
                                                style={
                                                    "display": "inline-block",
                                                    "width": "100%"
                                                })
-
-                # self.experiment_button.children = html.H2(Path(directory).stem)
-
-                return Path(directory).stem, [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown]
+                return Path(directory).stem,\
+                    directory, \
+                    [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown]
 
             return default_value
 
         @self._app.callback(
             Output({'component_id': 'select-mmsi-dropdown'}, 'options'),
             Input({'component_id': 'filter-mmsi-min-length'}, 'value'),
+            State('data-filename', 'data'),
             prevent_initial_callbacks=True
         )
-        def filter_mmsi(min_length):
-            messages_per_mmsi = self._current_data.groupby("mmsi", agg="count")
+        def filter_mmsi(min_length, data_filename):
+            adf = AnnotatedDataFrame.from_file(json.loads(data_filename))
+            messages_per_mmsi = adf.groupby("mmsi", agg="count")
             filtered_mmsi = messages_per_mmsi[messages_per_mmsi["count"] > min_length]
             selectable_mmsis = sorted(filtered_mmsi.mmsi.unique())
             return selectable_mmsis
 
         @self._app.callback(
-            Output({'component_id': 'mmsi-stats'}, 'children'),
+            [
+                Output({'component_id': 'mmsi-stats'}, 'children'),
+                Output('mmsi', 'data')
+            ],
             Input({'component_id': 'select-mmsi-dropdown'}, 'value'),
-            State({'component_id': 'mmsi-selection'}, 'children')
+            State('data-filename', 'data'),
         )
-        def select_mmsi(value, dropdown_mmsi_selection):
+        def select_mmsi(value, data_filename):
             if value is not None:
                 current_mmsi = int(value)
+                adf = AnnotatedDataFrame.from_file(json.loads(data_filename))
+                mmsi_df = adf[adf.mmsi == current_mmsi]
 
-                mmsi_df = self._current_data[self._current_data.mmsi == current_mmsi]
                 mean_lat = mmsi_df.mean("lat")
                 mean_lon = mmsi_df.mean("lon")
                 var_lat = mmsi_df.var("lat")
@@ -353,22 +336,24 @@ class AISApp(WebApplication):
                 trajectory_plot = dash.dcc.Graph(id="mmsi-plot-map",
                                                  figure=plot_boat_trajectory(mmsi_df))
 
-                return [mmsi_stats_table, trajectory_plot]
-            return None
+                return [mmsi_stats_table, trajectory_plot], json.dumps(value)
+            return None, json.dumps(None)
 
         @self._app.callback(
             [
                 Output('button-select-data-directory', 'children'),
                 Output('data-preview', 'children'),
+                Output('data-filename', 'data'),
             ],
             [
                 Input('button-select-data-directory', 'n_clicks'),
                 State('button-select-data-directory', 'children'),
                 State('data-preview', 'children'),
+                State('data-filename', 'data'),
             ],
             prevent_initial_callbacks=True
         )
-        def update_data(n_clicks, state_data_button, state_data_preview):
+        def update_data(n_clicks, state_data_button, state_data_preview, state_data_filename):
             """
             Set the current data that shall be used for prediction
 
@@ -377,63 +362,62 @@ class AISApp(WebApplication):
             :param state_data_preview:
             :return:
             """
-            if n_clicks > 0:
-                root = tkinter.Tk()
-                root.withdraw()
-                filename = filedialog.askopenfilename(title="Select data files",
-                                                      filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
-                root.destroy()
+            if n_clicks <= 0:
+                return state_data_button, state_data_preview, state_data_filename
 
-                if not isinstance(filename, str):
-                    return state_data_button, state_data_preview
+            root = tkinter.Tk()
+            root.withdraw()
+            filename = filedialog.askopenfilename(title="Select data files",
+                                                  filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
+            root.destroy()
 
-                self._current_data = AnnotatedDataFrame.from_file(filename=filename)
+            if not isinstance(filename, str):
+                return state_data_button, state_data_preview, state_data_filename
 
-                df = self._current_data[:5].to_pandas_df()
-                data_preview_table = dash_table.DataTable(
-                    data=df.to_dict('records'),
-                    columns=[{'id': c, 'name': c} for c in df.columns],
-                    # https://dash.plotly.com/datatable/style
-                    style_cell={'textAlign': 'center', 'padding': "5px"},
-                    style_header={'backgroundColor': 'lightgray',
-                                  'color': 'white',
-                                  'fontWeight': 'bold'}
-                )
-                select_mmsi_dropdown = dcc.Dropdown(
-                    placeholder="Select MSSI for prediction",
-                    id={'component_id': "select-mmsi-dropdown"},
-                    multi=False,
-                )
+            adf = AnnotatedDataFrame.from_file(filename=filename)
+            df = adf[:5].to_pandas_df()
+            data_preview_table = dash_table.DataTable(
+                data=df.to_dict('records'),
+                columns=[{'id': c, 'name': c} for c in df.columns],
+                # https://dash.plotly.com/datatable/style
+                style_cell={'textAlign': 'center', 'padding': "5px"},
+                style_header={'backgroundColor': 'lightgray',
+                              'color': 'white',
+                              'fontWeight': 'bold'}
+            )
+            select_mmsi_dropdown = dcc.Dropdown(
+                placeholder="Select MSSI for prediction",
+                id={'component_id': "select-mmsi-dropdown"},
+                multi=False,
+            )
 
-                min_messages = 0
-                max_messages = 10000
-                #markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
-                filter_mmsi_slider = dash.dcc.Slider(id={'component_id': 'filter-mmsi-min-length'},
-                                                     min=min_messages, max=max_messages,
-                                                     value=50,
-                                                     # marks={i: f"{int(10 ** i)}" for i in
-                                                     #       markers},
-                                                     )
-                if "mmsi" in df.columns:
-                    select_mmsi_dropdown.options = sorted(self._current_data.mmsi.unique())
-                else:
-                    self.log("No column 'mmsi' in the dataframe - did you select the right data?")
-
-                data_preview = [
-                    html.H3("Data Preview"),
-                    data_preview_table,
-                    html.H2("Select Vessel"),
-                    html.Div(id="mmsi-filter", children=[
-                        html.H3("Minimum sequence length"),
-                        filter_mmsi_slider
-                    ]),
-                    html.H3("MMSI"),
-                    select_mmsi_dropdown,
-                    html.Div(id={"component_id": "mmsi-stats"})
-                ]
-                return Path(filename).name, data_preview
+            min_messages = 0
+            max_messages = 10000
+            #markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
+            filter_mmsi_slider = dash.dcc.Slider(id={'component_id': 'filter-mmsi-min-length'},
+                                                 min=min_messages, max=max_messages,
+                                                 value=50,
+                                                 # marks={i: f"{int(10 ** i)}" for i in
+                                                 #       markers},
+                                                 )
+            if "mmsi" in df.columns:
+                select_mmsi_dropdown.options = sorted(adf.mmsi.unique())
             else:
-                return state_data_button, state_data_preview
+                self.log("No column 'mmsi' in the dataframe - did you select the right data?")
+
+            data_preview = [
+                html.H3("Data Preview"),
+                data_preview_table,
+                html.H2("Select Vessel"),
+                html.Div(id="mmsi-filter", children=[
+                    html.H3("Minimum sequence length"),
+                    filter_mmsi_slider
+                ]),
+                html.H3("MMSI"),
+                select_mmsi_dropdown,
+                html.Div(id={"component_id": "mmsi-stats"})
+            ]
+            return Path(filename).name, data_preview, json.dumps(filename)
 
         @self._app.callback(
             [
@@ -445,14 +429,21 @@ class AISApp(WebApplication):
                 Input({'component_id': 'button-predict-with-model'}, 'n_clicks'),
                 State({'component_id': 'button-predict-with-model'}, 'children'),
                 State({'component_id': 'button-predict-with-model'}, 'style'),
-                State({'component_id': 'select-mmsi-dropdown'}, 'value'),
+                State('mmsi', 'data'),  # current_mmsi
                 State('prediction-job', 'data'),
                 State('prediction-thread-status', 'data'),
+                State('experiment-directory', 'data'),
+                State('model-name', 'data'), # model_name
+                State('data-filename', 'data')
             ],
             prevent_initial_callbacks=True
         )
         def predict_with_model(n_clicks, button_label, button_style,
-                               current_mmsi, predict_job, prediction_thread_status):
+                               mmsi,
+                               predict_job, prediction_thread_status,
+                               experiment_directory,
+                               model_name,
+                               data_filename):
             """
             Handle the Button event on the predict button.
 
@@ -476,25 +467,26 @@ class AISApp(WebApplication):
 
                 style = button_style
                 style["backgroundColor"] = "green"
-                return json.dumps(None), f"Predict with {self._current_model_name}", style
+                return json.dumps(None), f"Predict with {model_name}", style
 
             # If mmsi is not set - there is no need to trigger the prediction
-            if current_mmsi is None or current_mmsi == "":
+            if mmsi is None:
                 style = button_style
                 style["backgroundColor"] = "green"
-                return predict_job, f"Predict with {self._current_model_name}", style
+                return predict_job, f"Predict with {model_name}", style
 
-            if self._current_model is not None:
+            current_mmsi = json.loads(mmsi)
+
+            if model_name is not None:
                 # 1. Get all mmsi based data from the dataframe
                 # 2. Allow to pick from an mmsi
                 # 3. Create a job to request the prediction
                 start_time = timer()
-                adf = self._current_data
 
-                # self._pipeline = DataProcessingPipeline.load(dir=self._experiment_folder)
-                # prepared_df = self._pipeline.transform(df=adf)
+                adf = AnnotatedDataFrame.from_file(json.loads(data_filename))
+
                 self.log(f"predict (mmsi: {current_mmsi}): load and apply state to dataframe")
-                DataProcessingPipeline.load_state(df=adf, dir=self._experiment_folder)
+                DataProcessingPipeline.load_state(df=adf, dir=experiment_directory)
                 prepared_df = adf._dataframe
 
                 self.log("predict: loading dataframe and converting to pandas")
@@ -531,8 +523,8 @@ class AISApp(WebApplication):
                 # Create the prediction job
                 job = Job(
                     id=0,
-                    experiment_dir=str(self._experiment_folder),
-                    model_name=self._current_model_name,
+                    experiment_dir=experiment_directory,
+                    model_name=model_name,
                     features=features,
                     target=features,
                     sequence_length=50,
@@ -688,7 +680,10 @@ class AISApp(WebApplication):
             # Create an interval from which regular updates are trigger, e.g.,
             # the logging console is updated - interval is set in milliseconds
             dcc.Interval("update-interval", interval=1000),
-
+            dcc.Store(id='experiment-directory', storage_type='session'),
+            dcc.Store(id='data-filename', storage_type="session"),
+            dcc.Store(id='model-name', storage_type="session"),
+            dcc.Store(id='mmsi', storage_type='session'),
             # A store to trigger the prediction background job - with storage type
             # memory, the data will be cleared with a refresh
             dcc.Store(id='prediction-job', storage_type="memory"),
