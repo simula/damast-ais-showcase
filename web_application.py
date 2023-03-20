@@ -1,18 +1,12 @@
 # Copyright (C) 2023 Jørgen S. Dokken
 #
 # SPDX-License-Identifier:     BSD 3-Clause
-import base64
 import datetime
 import json
-import multiprocessing
-import os
-import socket
 import tempfile
 import tkinter
 import webbrowser
-from collections import OrderedDict
 from pathlib import Path
-from time import sleep
 from timeit import default_timer as timer
 from tkinter import filedialog
 from typing import Dict, List, Any
@@ -20,14 +14,12 @@ from typing import Dict, List, Any
 import dash
 import diskcache
 import numpy as np
-import numpy.typing as npt
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objs as go
 import vaex
 from damast.core.dataframe import AnnotatedDataFrame
 from damast.core.dataprocessing import DataProcessingPipeline
-from damast.data_handling.accessors import SequenceIterator
 from damast.ml.experiments import Experiment
 from damast.ml.scheduler import JobScheduler, Job, ResponseCollector
 from dash import dash_table, State, DiskcacheManager
@@ -37,6 +29,13 @@ from dash import html, ctx
 cache = diskcache.Cache("./cache")
 background_callback_manager = DiskcacheManager(cache)
 
+# https://github.com/vaexio/dash-120million-taxi-app/blob/master/app.py
+# This has to do with layout/styling
+fig_layout_defaults = dict(
+    plot_bgcolor="#F9F9F9",
+    paper_bgcolor="#F9F9F9",
+)
+
 
 def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
     """Sort input dataframe by entries in given column"""
@@ -45,6 +44,70 @@ def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
 
 def transform_value(value):
     return 10 ** value
+
+
+def create_figure_histogram(x, counts, title=None, xlabel=None, ylabel=None):
+    # settings
+    color = 'royalblue'
+
+    # list of traces
+    traces = []
+
+    # Create the figure
+    line = go.scatter.Line(color=color, width=2)
+    hist = go.Scatter(x=x, y=counts, mode='lines', line_shape='hv', line=line, name=title, fill='tozerox')
+    traces.append(hist)
+
+    # Layout
+    title = go.layout.Title(text=title, x=0.5, y=1, font={'color': 'black'})
+    margin = go.layout.Margin(l=0, r=0, b=0, t=30)
+    legend = go.layout.Legend(orientation='h',
+                              bgcolor='rgba(0,0,0,0)',
+                              x=0.5,
+                              y=1,
+                              itemclick=False,
+                              itemdoubleclick=False)
+    layout = go.Layout(height=230,
+                       margin=margin,
+                       legend=legend,
+                       title=title,
+                       xaxis=go.layout.XAxis(title=xlabel),
+                       yaxis=go.layout.YAxis(title=ylabel),
+                       **fig_layout_defaults)
+
+    # Now calculate the most likely value (peak of the histogram)
+    # peak = np.round(x[np.argmax(counts)], 2)
+
+    return go.Figure(data=traces, layout=layout)
+
+
+def create_figure_histograms(data_df: vaex.DataFrame) -> go.Figure:
+    counts_mmsi = data_df.count(binby=data_df.mmsi, limits=[0, 900000000], shape=1000)
+    fig_mmsi = create_figure_histogram(np.linspace(0.0, 900000000, 1000), counts_mmsi,
+                                       title="mmsi", xlabel="deg", ylabel="count")
+    graph_mmsi = dcc.Graph(id='data-histogram-mmsi', figure=fig_mmsi)
+
+    counts_lat = data_df.count(binby=data_df.lat, limits=[-200.0, 200], shape=1000)
+    fig_lat = create_figure_histogram(np.linspace(-200.0, 200, 1000), counts_lat,
+                                      title="latitude", xlabel="deg", ylabel="count")
+    graph_lat = dcc.Graph(id='data-histogram-lat', figure=fig_lat)
+
+    counts_lon = data_df.count(binby=data_df.lon, limits=[-100.0, 100], shape=1000)
+    fig_lon = create_figure_histogram(np.linspace(-100.0, 100, 1000), counts_lon,
+                                      title="longitude", xlabel="deg", ylabel="count")
+    graph_lon = dcc.Graph(id='data-histogram-lon', figure=fig_lon)
+
+    # For each column plot the histogram
+    # fig_hist, ax = plt.subplots(1, 1, figsize=(10, 10))
+    # data_df.hist(col_name, ax=ax)
+    # plt.tight_layout()
+    # plt.close(fig_hist)
+    #   vaex.
+    return [
+        graph_mmsi,
+        graph_lat,
+        graph_lon
+    ]
 
 
 def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
@@ -71,6 +134,17 @@ def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
                       mapbox_style="open-street-map", mapbox_zoom=4)
 
     return fig
+
+
+def create_explore_dataset(df: AnnotatedDataFrame) -> List[Any]:
+    histograms = html.Div(id='data-histograms',
+                          children=create_figure_histograms(data_df=df._dataframe),
+                          style={
+                              'display': 'inline'
+                          })
+    return [
+        histograms
+    ]
 
 
 def count_number_of_messages(data: vaex.DataFrame) -> vaex.DataFrame:
@@ -338,6 +412,7 @@ class AISApp(WebApplication):
             selectable_mmsis = sorted(filtered_mmsi.mmsi.unique())
             return selectable_mmsis
 
+
         @self._app.callback(
             [
                 Output({'component_id': 'mmsi-stats'}, 'children'),
@@ -389,7 +464,9 @@ class AISApp(WebApplication):
                 Output('data-preview', 'children'),
                 Output('prediction-mmsi-selection', 'children'),
                 Output('data-filename', 'data'),
-                Output('mmsi', 'clear_data')
+                Output('mmsi', 'clear_data'),
+                Output('explore-dataset', 'children')
+
             ],
             [
                 Input('button-select-data-directory', 'n_clicks'),
@@ -400,7 +477,8 @@ class AISApp(WebApplication):
             ],
             prevent_initial_callbacks=True
         )
-        def update_data(n_clicks, state_data_button, state_prediction_mmsi_selection, state_data_preview, state_data_filename):
+        def update_data(n_clicks, state_data_button, state_prediction_mmsi_selection, state_data_preview,
+                        state_data_filename):
             """
             Set the current data that shall be used for prediction
 
@@ -427,7 +505,8 @@ class AISApp(WebApplication):
                 filename = state_data_filename
 
             if filename is None or not isinstance(filename, str):
-                return state_data_button, state_data_preview, state_prediction_mmsi_selection, state_data_filename, False
+                return state_data_button, state_data_preview, state_prediction_mmsi_selection, \
+                    state_data_filename, False, None
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             df = adf[:5].to_pandas_df()
@@ -440,6 +519,9 @@ class AISApp(WebApplication):
                               'color': 'white',
                               'fontWeight': 'bold'}
             )
+
+            explore_dataset_view = create_explore_dataset(df=adf)
+
             select_mmsi_dropdown = dcc.Dropdown(
                 placeholder="Select MSSI for prediction",
                 id={'component_id': "select-mmsi-dropdown"},
@@ -475,7 +557,8 @@ class AISApp(WebApplication):
                 select_mmsi_dropdown,
                 html.Div(id={"component_id": "mmsi-stats"})
             ]
-            return Path(filename).name, data_preview, select_for_prediction, filename, True
+            return Path(filename).name, data_preview, select_for_prediction, \
+                filename, True, explore_dataset_view
 
         @self._app.callback(
             Output('prediction-job', 'data'),
@@ -732,7 +815,10 @@ class AISApp(WebApplication):
     def tab_explore(self) -> dcc.Tab:
         return dcc.Tab(label="Explore",
                        value="tab-explore",
-                       children=[],
+                       children=[
+                           html.Br(),
+                           html.Div(id='explore-dataset')
+                       ],
                        className="tab")
 
     def generate_layout(self):
