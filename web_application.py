@@ -6,6 +6,7 @@ import json
 import tempfile
 import tkinter
 import webbrowser
+from enum import Enum
 from pathlib import Path
 from timeit import default_timer as timer
 from tkinter import filedialog
@@ -28,6 +29,12 @@ from dash import html, ctx
 
 cache = diskcache.Cache("./cache")
 background_callback_manager = DiskcacheManager(cache)
+
+
+class VisualizationType(str, Enum):
+    Histogram = "Histogram"
+    Statistics = "Statistics"
+
 
 # https://github.com/vaexio/dash-120million-taxi-app/blob/master/app.py
 # This has to do with layout/styling
@@ -81,33 +88,58 @@ def create_figure_histogram(x, counts, title=None, xlabel=None, ylabel=None):
     return go.Figure(data=traces, layout=layout)
 
 
-def create_figure_histograms(data_df: vaex.DataFrame) -> go.Figure:
-    counts_mmsi = data_df.count(binby=data_df.mmsi, limits=[0, 900000000], shape=1000)
-    fig_mmsi = create_figure_histogram(np.linspace(0.0, 900000000, 1000), counts_mmsi,
-                                       title="mmsi", xlabel="deg", ylabel="count")
-    graph_mmsi = dcc.Graph(id='data-histogram-mmsi', figure=fig_mmsi)
+def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
+    data_df = adf._dataframe.copy()
 
-    counts_lat = data_df.count(binby=data_df.lat, limits=[-200.0, 200], shape=1000)
-    fig_lat = create_figure_histogram(np.linspace(-200.0, 200, 1000), counts_lat,
-                                      title="latitude", xlabel="deg", ylabel="count")
-    graph_lat = dcc.Graph(id='data-histogram-lat', figure=fig_lat)
+    histograms = []
+    min_value = data_df[column_name].min()
+    max_value = data_df[column_name].max()
+    counts = data_df.count(binby=data_df[column_name],
+                           # limits=[0, 900000000],
+                           shape=1000)
+    unit_name = str(adf._metadata[column_name].unit)
+    if unit_name is None:
+        unit_name = "<no known unit>"
 
-    counts_lon = data_df.count(binby=data_df.lon, limits=[-100.0, 100], shape=1000)
-    fig_lon = create_figure_histogram(np.linspace(-100.0, 100, 1000), counts_lon,
-                                      title="longitude", xlabel="deg", ylabel="count")
-    graph_lon = dcc.Graph(id='data-histogram-lon', figure=fig_lon)
+    fig_column = create_figure_histogram(np.linspace(min_value, max_value, 1000), counts,
+                                         #title=f"\n{column_name}",
+                                         xlabel=unit_name,
+                                         ylabel="count")
+    histograms.append(html.H4(f"Histogram: '{column_name}'"))
+    histograms.append(dcc.Graph(id=f'data-histogram-{column_name}', figure=fig_column))
+    return histograms
 
-    # For each column plot the histogram
-    # fig_hist, ax = plt.subplots(1, 1, figsize=(10, 10))
-    # data_df.hist(col_name, ax=ax)
-    # plt.tight_layout()
-    # plt.close(fig_hist)
-    #   vaex.
-    return [
-        graph_mmsi,
-        graph_lat,
-        graph_lon
-    ]
+
+def create_div_statistic(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
+    data_df = adf._dataframe.copy()
+    statistics = []
+    min_value = data_df.min(column_name)
+    max_value = data_df.max(column_name)
+    median_approx = data_df.median_approx(column_name)
+    mean = data_df.mean(column_name)
+    variance = data_df.var(column_name)
+
+    data = {
+        "min": min_value,
+        "max": max_value,
+        "median (approx)": median_approx,
+        "mean": f"{mean:.2f} +/- {variance:.3f}",
+    }
+
+    stats_table = dash_table.DataTable(
+        id={'component_id': f'data-statistics-{column_name}'},
+        data=[data],
+        columns=[{'id': c, 'name': c} for c in data.keys()],
+        # https://dash.plotly.com/datatable/style
+        style_cell={'textAlign': 'center', 'padding': "5px"},
+        style_header={'backgroundColor': 'lightgray',
+                      'color': 'white',
+                      'fontWeight': 'bold'}
+    )
+
+    statistics.append(html.H4(f"Statistics '{column_name}'"))
+    statistics.append(stats_table)
+    return statistics
 
 
 def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
@@ -134,17 +166,6 @@ def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
                       mapbox_style="open-street-map", mapbox_zoom=4)
 
     return fig
-
-
-def create_explore_dataset(df: AnnotatedDataFrame) -> List[Any]:
-    histograms = html.Div(id='data-histograms',
-                          children=create_figure_histograms(data_df=df._dataframe),
-                          style={
-                              'display': 'inline'
-                          })
-    return [
-        histograms
-    ]
 
 
 def count_number_of_messages(data: vaex.DataFrame) -> vaex.DataFrame:
@@ -324,7 +345,7 @@ class AISApp(WebApplication):
         )
         def update_predict_button(prediction_thread_status, model_name, button_style):
             style = button_style.copy()
-            if prediction_thread_status == ResponseCollector.Status.RUNNING.value:
+            if prediction_thread_status == Job.Status.RUNNING.value:
                 style["backgroundColor"] = "red"
                 return f"Cancel - Predict with {model_name}", style, False
             else:
@@ -412,7 +433,6 @@ class AISApp(WebApplication):
             selectable_mmsis = sorted(filtered_mmsi.mmsi.unique())
             return selectable_mmsis
 
-
         @self._app.callback(
             [
                 Output({'component_id': 'mmsi-stats'}, 'children'),
@@ -465,8 +485,6 @@ class AISApp(WebApplication):
                 Output('prediction-mmsi-selection', 'children'),
                 Output('data-filename', 'data'),
                 Output('mmsi', 'clear_data'),
-                Output('explore-dataset', 'children')
-
             ],
             [
                 Input('button-select-data-directory', 'n_clicks'),
@@ -506,7 +524,7 @@ class AISApp(WebApplication):
 
             if filename is None or not isinstance(filename, str):
                 return state_data_button, state_data_preview, state_prediction_mmsi_selection, \
-                    state_data_filename, False, None
+                    state_data_filename, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             df = adf[:5].to_pandas_df()
@@ -519,8 +537,6 @@ class AISApp(WebApplication):
                               'color': 'white',
                               'fontWeight': 'bold'}
             )
-
-            explore_dataset_view = create_explore_dataset(df=adf)
 
             select_mmsi_dropdown = dcc.Dropdown(
                 placeholder="Select MSSI for prediction",
@@ -558,7 +574,57 @@ class AISApp(WebApplication):
                 html.Div(id={"component_id": "mmsi-stats"})
             ]
             return Path(filename).name, data_preview, select_for_prediction, \
-                filename, True, explore_dataset_view
+                filename, True
+
+        @self._app.callback(
+            Output({'component_id': 'data-columns-dropdown'}, 'options'),
+            Input('data-filename', 'data')
+        )
+        def update_data_column_dropdown(state_data_filename):
+            if state_data_filename is None:
+                return []
+
+            adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
+            return adf.column_names
+
+        @self._app.callback(
+            Output('explore-dataset', 'children'),
+            Input({'component_id': 'data-visualization-dropdown'}, 'value'),
+            Input({'component_id': 'data-columns-dropdown'}, 'value'),
+            State('data-filename', 'data')
+        )
+        def update_explore_dataset(dropdown_data_visualization, state_data_columns, state_data_filename):
+
+            if state_data_filename is None or dropdown_data_visualization is None:
+                return []
+
+            adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
+
+            explore_dataset_children = []
+            for column_name in state_data_columns:
+                children = []
+                if VisualizationType.Histogram.value in dropdown_data_visualization:
+                    children.extend(create_div_histogram(adf=adf, column_name=column_name))
+
+                if VisualizationType.Statistics.value in dropdown_data_visualization:
+                    children.extend(create_div_statistic(adf=adf, column_name=column_name))
+
+                explore_dataset_children.append(html.H3(f"Explore '{column_name}'"))
+                explore_dataset_children.append(
+                    html.Div(
+                        id={'component_id': f'explore-column-{column_name}'},
+                        children=children,
+                        style= {
+                            'backgroundColor': 'lightblue',
+                            'borderRadius': '10px',
+                            'borderStyle': 'solid',
+                            'borderWidth': '3px',
+                            #'margin': '10px'
+                        }
+                    )
+                )
+
+            return explore_dataset_children
 
         @self._app.callback(
             Output('prediction-job', 'data'),
@@ -599,7 +665,7 @@ class AISApp(WebApplication):
             # When the button holds the label cancel, a prediction has been triggered
             # but if the actual corresponding thread is not running anymore, the
             # button should switch back to the default anyway
-            if prediction_thread_status == ResponseCollector.Status.RUNNING.value:
+            if prediction_thread_status == Job.Status.RUNNING.value:
                 job_dict = json.loads(predict_job)
                 self._job_scheduler.stop(job_dict["id"])
                 return predict_job
@@ -715,7 +781,7 @@ class AISApp(WebApplication):
             :return:
             """
             prediction_result = None
-            prediction_thread_status = ResponseCollector.Status.NOT_STARTED.value
+            prediction_thread_status = Job.Status.NOT_STARTED.value
             if prediction_job_data is not None:
                 json_data = json.loads(prediction_job_data)
                 if json_data is not None:
@@ -813,10 +879,32 @@ class AISApp(WebApplication):
                        ])
 
     def tab_explore(self) -> dcc.Tab:
+        data_column_dropdown = dash.html.Div(children=[html.H3("Column"),
+                                                       dash.dcc.Dropdown(id={'component_id': "data-columns-dropdown"},
+                                                                         placeholder="Select a data column",
+                                                                         multi=True)],
+                                             style={
+                                                 "display": "inline-block",
+                                                 "width": "100%",
+                                             })
+
+        visualization_type_dropdown = dash.html.Div(children=[html.H3("Visualization Type"),
+                                                              dash.dcc.Dropdown(
+                                                                  id={'component_id': "data-visualization-dropdown"},
+                                                                  placeholder="Select a visualization type column",
+                                                                  multi=True,
+                                                                  options=[x for x in VisualizationType])
+                                                              ],
+                                                    style={
+                                                        "display": "inline-block",
+                                                        "width": "100%",
+                                                    })
         return dcc.Tab(label="Explore",
                        value="tab-explore",
                        children=[
                            html.Br(),
+                           data_column_dropdown,
+                           visualization_type_dropdown,
                            html.Div(id='explore-dataset')
                        ],
                        className="tab")
