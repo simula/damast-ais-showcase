@@ -34,6 +34,7 @@ background_callback_manager = DiskcacheManager(cache)
 class VisualizationType(str, Enum):
     Histogram = "Histogram"
     Statistics = "Statistics"
+    Metadata = "Metadata"
 
 
 # https://github.com/vaexio/dash-120million-taxi-app/blob/master/app.py
@@ -97,12 +98,16 @@ def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
     counts = data_df.count(binby=data_df[column_name],
                            # limits=[0, 900000000],
                            shape=1000)
-    unit_name = str(adf._metadata[column_name].unit)
+    unit_name = None
+    try:
+        unit_name = str(adf._metadata[column_name].unit)
+    except KeyError:
+        pass
     if unit_name is None:
         unit_name = "<no known unit>"
 
     fig_column = create_figure_histogram(np.linspace(min_value, max_value, 1000), counts,
-                                         #title=f"\n{column_name}",
+                                         # title=f"\n{column_name}",
                                          xlabel=unit_name,
                                          ylabel="count")
     histograms.append(html.H4(f"Histogram: '{column_name}'"))
@@ -137,9 +142,35 @@ def create_div_statistic(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
                       'fontWeight': 'bold'}
     )
 
-    statistics.append(html.H4(f"Statistics '{column_name}'"))
+    statistics.append(html.H4(f"Statistics: '{column_name}'"))
     statistics.append(stats_table)
     return statistics
+
+
+def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
+    metadata = []
+    try:
+        data = adf._metadata[column_name].to_dict()
+        metadata_table = dash_table.DataTable(
+            id={'component_id': f'data-metadata-{column_name}'},
+            data=[data],
+            columns=[{'id': c, 'name': c} for c in data.keys()],
+            # https://dash.plotly.com/datatable/style
+            style_cell={'textAlign': 'center', 'padding': "5px"},
+            style_header={'backgroundColor': 'lightgray',
+                          'color': 'white',
+                          'fontWeight': 'bold'}
+        )
+    except KeyError:
+        metadata_table = html.Div(id={'component_id': f'metadata-{column_name}-warning'},
+                                  children=html.H5("No metadata available for this column"),
+                                  style={
+                                    'backgroundColor': 'orange'
+                                  })
+
+    metadata.append(html.H4(f"Metadata: '{column_name}'"))
+    metadata.append(metadata_table)
+    return metadata
 
 
 def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
@@ -609,17 +640,20 @@ class AISApp(WebApplication):
                 if VisualizationType.Statistics.value in dropdown_data_visualization:
                     children.extend(create_div_statistic(adf=adf, column_name=column_name))
 
+                if VisualizationType.Metadata.value in dropdown_data_visualization:
+                    children.extend(create_div_metadata(adf=adf, column_name=column_name))
+
                 explore_dataset_children.append(html.H3(f"Explore '{column_name}'"))
                 explore_dataset_children.append(
                     html.Div(
                         id={'component_id': f'explore-column-{column_name}'},
                         children=children,
-                        style= {
+                        style={
                             'backgroundColor': 'lightblue',
                             'borderRadius': '10px',
                             'borderStyle': 'solid',
                             'borderWidth': '3px',
-                            #'margin': '10px'
+                            # 'margin': '10px'
                         }
                     )
                 )
