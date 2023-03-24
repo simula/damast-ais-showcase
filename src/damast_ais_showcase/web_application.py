@@ -3,6 +3,7 @@
 # SPDX-License-Identifier:     BSD 3-Clause
 import datetime
 import json
+import logging
 import tempfile
 import tkinter
 import webbrowser
@@ -27,7 +28,19 @@ from dash import dash_table, State, DiskcacheManager
 from dash import dcc, Output, Input
 from dash import html, ctx
 
-cache = diskcache.Cache("./cache")
+# Using dash_logger in combination with dash_mantine_components
+# https://community.plotly.com/t/logging-in-dash-logtransform/61173/17
+# https://www.dash-extensions.com/transforms/log_transform
+import dash_mantine_components as dmc
+from dash_extensions.enrich import LogTransform, DashLogger, DashProxy
+
+from logging import getLogger, Logger, INFO, DEBUG, WARNING
+
+logging.basicConfig()
+_log: Logger = getLogger(__name__)
+_log.setLevel(DEBUG)
+
+cache = diskcache.Cache( Path(tempfile.gettempdir()) / "damast-ais-showcase-cache")
 background_callback_manager = DiskcacheManager(cache)
 
 
@@ -165,7 +178,7 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
         metadata_table = html.Div(id={'component_id': f'metadata-{column_name}-warning'},
                                   children=html.H5("No metadata available for this column"),
                                   style={
-                                    'backgroundColor': 'orange'
+                                      'backgroundColor': 'orange'
                                   })
 
     metadata.append(html.H4(f"Metadata: '{column_name}'"))
@@ -204,26 +217,25 @@ def count_number_of_messages(data: vaex.DataFrame) -> vaex.DataFrame:
     return data.groupby("mmsi", agg="count")
 
 
-class WebApplication():
+class WebApplication:
     """
     Base class for Dash web applications
     """
 
     _app: dash.Dash
-    _data: Dict[str, vaex.DataFrame]
     _layout: List[Any]
     _port: str
     _server: str
 
-    def __init__(self, df: Dict[str, vaex.DataFrame],
+    def __init__(self,
                  header: str,
                  server: str = "0.0.0.0", port: str = "8888"):
-        self._data = df
 
         external_scripts = [
             "https://code.jquery.com/jquery-2.2.4.js"
         ]
-        self._app = dash.Dash(__name__,
+        self._app = DashProxy(__name__,
+                              transforms=[LogTransform()],
                               external_scripts=external_scripts,
                               # Allow to define callbacks on dynamically defined components
                               suppress_callback_exceptions=False,
@@ -252,25 +264,14 @@ class WebApplication():
 
 
 class AISApp(WebApplication):
-    _messages_per_mmsi: vaex.DataFrame
-
-    #: Set available set of model that can be used for prediction
-    _models: Dict[str, Any]
-    _pipeline: DataProcessingPipeline
-
-    _experiment_folder: Path
-
-    _current_model_name: str
-    _current_model: Any
-
+    #: Allow to run predictions as background job
     _job_scheduler: JobScheduler
-
     _log_messages: List[str]
 
     select_experiment: html.Div
 
-    def __init__(self, ais: vaex.DataFrame, port: str = "8888"):
-        super().__init__({"ais": ais}, "AIS Anomaly Detection", port=port)
+    def __init__(self, port: str = "8888"):
+        super().__init__("AIS Anomaly Detection", port=port)
 
         self._log_messages = []
         self._job_scheduler = JobScheduler()
@@ -318,9 +319,19 @@ class AISApp(WebApplication):
             html.Div(id='data-preview'),
         ])
 
-    def log(self, message: str):
+    def log(self, message: str,
+            level=INFO,
+            dash_logger: DashLogger = None
+            ):
         timestamp = datetime.datetime.utcnow()
         self._log_messages.append((timestamp, message))
+        if dash_logger:
+            if level == INFO:
+                dash_logger.info(message, autoClose=10000)
+            else:
+                dash_logger.log(level=level, message=message)
+
+        _log.log(level=level, msg=message)
 
     def callbacks(self):
         """Define input/output of the different dash applications
@@ -399,9 +410,10 @@ class AISApp(WebApplication):
                 State('button-select-experiment-directory', 'children'),
                 State('experiment-directory', 'data')
             ],
-            prevent_initial_callbacks=True
+            prevent_initial_callbacks=True,
+            log=True
         )
-        def load_experiment(n_clicks, state_button_children, state_experiment_directory):
+        def load_experiment(n_clicks, state_button_children, state_experiment_directory, dash_logger: DashLogger):
             """
             Allow to select the experiment and populate the available models for the dropdown list.
 
@@ -430,7 +442,9 @@ class AISApp(WebApplication):
             if directory is None or not isinstance(directory, str):
                 return default_value
 
-            self.log(message=f"Loading Experiment from {directory}")
+            self.log(f"Loading Experiment from {directory}",
+                     dash_logger=dash_logger)
+
             models = Experiment.from_directory(directory)
 
             row_models = []
@@ -524,10 +538,11 @@ class AISApp(WebApplication):
                 State('data-preview', 'children'),
                 State('data-filename', 'data'),
             ],
-            prevent_initial_callbacks=True
+            prevent_initial_callbacks=True,
+            log=True
         )
         def update_data(n_clicks, state_data_button, state_prediction_mmsi_selection, state_data_preview,
-                        state_data_filename):
+                        state_data_filename, dash_logger: DashLogger):
             """
             Set the current data that shall be used for prediction
 
@@ -536,6 +551,7 @@ class AISApp(WebApplication):
             :param state_data_preview:
             :return:
             """
+            filename = None
             if n_clicks > 0:
                 initial_directory = str(Path().resolve())
                 if state_data_filename is not None:
@@ -587,7 +603,9 @@ class AISApp(WebApplication):
             if "mmsi" in df.columns:
                 select_mmsi_dropdown.options = sorted(adf.mmsi.unique())
             else:
-                self.log("No column 'mmsi' in the dataframe - did you select the right data?")
+                self.log("No column 'mmsi' in the dataframe - did you select the right data?",
+                         level=WARNING,
+                         dash_logger=dash_logger)
 
             data_preview = [
                 html.H3("Data Preview"),
@@ -622,9 +640,11 @@ class AISApp(WebApplication):
             Output('explore-dataset', 'children'),
             Input({'component_id': 'data-visualization-dropdown'}, 'value'),
             Input({'component_id': 'data-columns-dropdown'}, 'value'),
-            State('data-filename', 'data')
+            State('data-filename', 'data'),
+            log=True
         )
-        def update_explore_dataset(dropdown_data_visualization, state_data_columns, state_data_filename):
+        def update_explore_dataset(dropdown_data_visualization, state_data_columns, state_data_filename,
+                                   dash_logger: DashLogger):
 
             if state_data_filename is None or dropdown_data_visualization is None:
                 return []
@@ -673,14 +693,16 @@ class AISApp(WebApplication):
                 State('model-name', 'data'),  # model_name
                 State('data-filename', 'data')
             ],
-            prevent_initial_callbacks=True
+            prevent_initial_callbacks=True,
+            log=True
         )
         def predict_with_model(n_clicks, button_label, button_style,
                                mmsi,
                                predict_job, prediction_thread_status,
                                experiment_directory,
                                model_name,
-                               data_filename):
+                               data_filename,
+                               dash_logger: DashLogger):
             """
             Handle the Button event on the predict button.
 
@@ -718,25 +740,33 @@ class AISApp(WebApplication):
 
                 adf = AnnotatedDataFrame.from_file(data_filename)
 
-                self.log(f"predict (mmsi: {current_mmsi}): load and apply state to dataframe")
+                self.log(f"predict (mmsi: {current_mmsi}): load and apply state to dataframe",
+                         dash_logger=dash_logger)
                 DataProcessingPipeline.load_state(df=adf, dir=experiment_directory)
                 prepared_df = adf._dataframe
 
-                self.log("predict: loading dataframe and converting to pandas")
+                self.log("predict: loading dataframe and converting to pandas",
+                         dash_logger=dash_logger)
                 df = prepared_df[prepared_df.mmsi == current_mmsi]
                 if df.count() < 51:
-                    self.log(f"Data from MMSI ({current_mmsi}) is too short/has insufficient length")
+                    self.log(f"Data from MMSI ({current_mmsi}) is too short/has insufficient length",
+                             level=WARNING,
+                             dash_logger=dash_logger)
                     # RUN PREDICTION AND PRESENT THE RESULT -- ASYNC
                     return json.dumps(None)
 
                 dash.callback_context.record_timing('predict:prepare', timer() - start_time, 'pipeline: transform data')
 
-                self.log("predict: preparing prediction job")
+                self.log("predict: preparing prediction job",
+                         dash_logger=dash_logger)
+
                 # Temporarily store this sequence to disk - so that the worker can pick it up
                 tmpdir = tempfile.mkdtemp(prefix='.damast-ais-showcase.')
                 tmpfile = Path(tmpdir) / f"mmsi-{current_mmsi}.hdf5"
                 df.export(tmpfile)
-                self.log(f"df: exported to {tmpfile}")
+                self.log(f"df: exported to {tmpfile}",
+                         dash_logger=dash_logger)
+
                 if not tmpfile.exists():
                     raise FileNotFoundError("Failed to create temporary data file")
 
@@ -771,43 +801,15 @@ class AISApp(WebApplication):
 
         @self._app.callback(
             [
-                Output('logging-console-display', 'data')
-            ],
-            [
-                Input({'component_id': 'button-logging-console'}, 'n_clicks'),
-                State('logging-console-display', 'data')
-            ],
-            prevent_initial_callbacks=True
-        )
-        def logging_console_toggle(n_clicks, logging_console_display):
-            """
-            Callback to setting the state for the show/hide of the logging console
-
-            :param n_clicks:
-            :param logging_console_display:
-            :return: Store value for the logging-console-display
-            """
-            if ctx.triggered_id == 'logging-console-display' or n_clicks is None:
-                return [logging_console_display]
-
-            if logging_console_display == "show":
-                return ["hide"]
-            else:
-                return ["show"]
-
-        @self._app.callback(
-            [
                 Output('prediction-results', 'children'),
                 Output('prediction-thread-status', 'data'),
-                Output('logging-console', 'children'),
             ],
             [
                 Input('update-interval', 'n_intervals'),
                 State('prediction-job', 'data'),
-                State('logging-console-display', 'data')
             ],
         )
-        def interval_update(n_intervals, prediction_job_data, logging_console_display):
+        def interval_update(n_intervals, prediction_job_data):
             """
 
             :param n_intervals: current trigger of intervals
@@ -836,62 +838,7 @@ class AISApp(WebApplication):
 
                     prediction_result = dcc.Graph(figure=fig)
 
-            # take in the messages through some function
-            log_entries = []
-            for timestamp, msg in self._log_messages:
-                log_entries.append(html.Tr(children=[
-                    html.Td(timestamp.strftime("%Y%m%d-%H%M%S")),
-                    html.Td(msg)])
-                )
-
-            logging_table = None
-            if logging_console_display == "show":
-                logging_table = html.Table(title="Logging Console",
-                                           children=[
-                                               html.Thead(
-                                                   children=[
-                                                       html.Tr(
-                                                           children=[
-                                                               html.Th("timestamp"),
-                                                               html.Th("message"),
-                                                           ]
-                                                       )
-                                                   ]
-                                               ),
-                                               html.Tbody(
-                                                   children=log_entries
-                                               )
-                                           ],
-                                           style={
-                                               'background': 'lightyellow',
-                                               'borderStyle': 'solid',
-                                               'borderRadius': '5px',
-                                               'borderWidth': '1px',
-                                               'width': '100%',
-                                               'maxHeight': '20%',
-                                               'overflow': 'auto'
-                                           }
-                                           )
-            button_label = "show"
-            if logging_console_display == "show":
-                button_label = "hide"
-
-            button_logging_display = html.Button(button_label,
-                                                 id={'component_id': "button-logging-console"},
-                                                 style={
-                                                     'borderStyle': 'none',
-                                                     'borderRadius': '5px'
-                                                 })
-
-            return prediction_result, prediction_thread_status, [
-                html.Hr(),
-                html.H3("Logging Console ",
-                        style={
-                            "display": "inline"
-                        }),
-                button_logging_display,
-                logging_table
-            ]
+            return prediction_result, prediction_thread_status
 
     def tab_predict(self) -> dcc.Tab:
         return dcc.Tab(label='Predict',
@@ -950,22 +897,10 @@ class AISApp(WebApplication):
             html.Div([
                 # upload,
                 self.select_experiment,
-                html.Div(id='logging-console',
-                         children=[html.H3("Logging Console"),
-                                   html.Button("Hide", id={'component_id': 'button-logging-console'},
-                                               n_clicks=0)],
-                         style={
-                             "position": "fixed",
-                             "bottom": 0,
-                             "width": "100%"
-                         }),
                 # Create an interval from which regular updates are trigger, e.g.,
                 # the logging console is updated - interval is set in milliseconds
                 dcc.Interval("update-interval", interval=1000),
                 # Control showing of control
-                dcc.Store(id='logging-console-display',
-                          data="hide",
-                          storage_type="session"),
                 html.Div(id="tab-spacer",
                          style={
                              "height": "2em"

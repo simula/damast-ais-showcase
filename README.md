@@ -4,17 +4,18 @@ This project serves as a showcase for the dataprocessing
 and machine learning model application in the context
 of maritime (AIS) data.
 
+## Install requirements
 
-## Usage
+- dash-extensions
+- dash-mantine-components
 
-Execute:
+
 ```commandline
-    python3 main.py --file=data/ais_20200101.hdf5 --mmsi-file=data/mmsi2vesseltype.hdf5 --port=8888
+    pip install -e .
 ```
 
-### Alternative
-
-Update the start_local.sh script according to the venv that you are running.
+## Usage
+Execute:
 ```commandline
-    ./start_local.sh
+    damast-ais-showcase-start
 ```
