@@ -424,6 +424,7 @@ class AISApp(WebApplication):
             """
             default_value = state_button_children, state_experiment_directory, "", False
 
+            directory = ''
             if n_clicks > 0:
                 root = tkinter.Tk()
                 root.withdraw()
@@ -439,7 +440,7 @@ class AISApp(WebApplication):
             else:
                 directory = state_experiment_directory
 
-            if directory is None or not isinstance(directory, str):
+            if directory == '' or not isinstance(directory, str):
                 return default_value
 
             self.log(f"Loading Experiment from {directory}",
@@ -551,7 +552,7 @@ class AISApp(WebApplication):
             :param state_data_preview:
             :return:
             """
-            filename = None
+            filename = ''
             if n_clicks > 0:
                 initial_directory = str(Path().resolve())
                 if state_data_filename is not None:
@@ -569,7 +570,7 @@ class AISApp(WebApplication):
             else:
                 filename = state_data_filename
 
-            if filename is None or not isinstance(filename, str):
+            if filename == '' or not isinstance(filename, str):
                 return state_data_button, state_data_preview, state_prediction_mmsi_selection, \
                     state_data_filename, False
 
