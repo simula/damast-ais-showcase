@@ -8,6 +8,7 @@ from typing import Union
 
 import damast
 import vaex
+import os
 from damast.core.dataframe import AnnotatedDataFrame
 from damast.core.dataprocessing import PipelineElement
 from damast.core.datarange import CyclicMinMax
@@ -75,7 +76,11 @@ class LatLonTransformer(PipelineElement):
 
 def run():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--port", dest="port", required=True, type=int, help="Port for dash server")
+    parser.add_argument("--port",
+                        dest="port",
+                        type=int,
+                        default=8888,
+                        help="Port for dash server")
     parser.add_argument("--delimiter", dest="delimiter", required=False, type=str, default=";",
                         help="Delimiter used in csv file")
     args = parser.parse_args()
@@ -93,4 +98,9 @@ def run_worker():
 
 
 if __name__ == "__main__":
-    run()
+    return_val = os.fork()
+    if return_val == 0:
+        print(f"Starting worker with pid '{os.getpid()}'")
+        run_worker()
+    else:
+        run()

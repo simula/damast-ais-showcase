@@ -35,11 +35,13 @@ dependencies = [
     "dash-extensions",
     "dash-mantine-components"
 ]
+[project.license]
+file = "LICENSE"
 
 [project.urls]
-homepage = "https://gitlab.com/simula-srl/projects/t-sar/damast-ais-showcase"
-documentation = "https://gitlab.com/simula-srl/projects/t-sar/damast-ais-showcase"
-repository = "https://gitlab.com/simula-srl/projects/t-sar/damast-ais-showcase"
+homepage = "https://gitlab.com/simula-srl/damast-ais-showcase"
+documentation = "https://gitlab.com/simula-srl/damast-ais-showcase"
+repository = "https://gitlab.com/simula-srl/damast-ais-showcase"
 
 #[project.entry-points]
 
@@ -63,13 +65,6 @@ damast-ais-showcase-worker = "damast_ais_showcase.main:run_worker"
 
 [tool.mypy]
 ignore_missing_imports = true
-
-[tools.setuptools]
-package-dir = "src"
-scripts = ["scripts/start_local.sh"]
-
-[tool.pytest.ini_options]
-addopts = "--cov --cov-report html:doc/ --cov-report term-missing"
 
 [tool.coverage.run]
 source = ["src"]
