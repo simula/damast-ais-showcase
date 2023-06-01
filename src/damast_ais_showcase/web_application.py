@@ -193,7 +193,11 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     return metadata
 
 
-def create_figure_boat_trajectory(data_df: vaex.DataFrame, density_by: Optional[str] = None) -> go.Figure:
+def create_figure_boat_trajectory(data_df: vaex.DataFrame,
+                                  zoom_factor: float = 4,
+                                  center: Optional[Dict[str, float]] = None,
+                                  density_by: Optional[str] = None,
+                                  ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
     NOTE: Assumes that the input data is sorted by in time
@@ -237,7 +241,10 @@ def create_figure_boat_trajectory(data_df: vaex.DataFrame, density_by: Optional[
     fig.update_coloraxes(showscale=False)
 
     fig.update_layout(height=1000,
-                      mapbox_style="open-street-map", mapbox_zoom=4)
+                      mapbox_style="open-street-map",
+                      mapbox_zoom=zoom_factor)
+    if center:
+        fig.update_layout(mapbox_center=center)
 
     return fig
 
@@ -525,8 +532,11 @@ class AISApp(WebApplication):
             Input({'component_id': 'select-passage_plan_id-dropdown'}, 'value'),
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             State('data-filename', 'data'),
+            State('passage_plan_id', 'data'),
+            State({'component_id': 'passage_plan_id-plot-map'}, 'figure'),
+            prevent_initial_callback=True
         )
-        def select_passage_plan_id(passage_plan_id, feature, data_filename):
+        def select_passage_plan_id(passage_plan_id, feature, data_filename, prev_passage_plan_id, plot_map_cfg):
             if passage_plan_id is not None:
                 current_passage_plan_id = int(passage_plan_id)
                 adf = AnnotatedDataFrame.from_file(data_filename)
@@ -552,15 +562,27 @@ class AISApp(WebApplication):
                                   'color': 'white',
                                   'fontWeight': 'bold'}
                 )
-                trajectory_plot = dash.dcc.Graph(id="passage_plan_id-plot-map",
-                                                 figure=create_figure_boat_trajectory(passage_plan_id_df, density_by=feature),
+
+                zoom_factor = 4
+                center = None
+                if prev_passage_plan_id and prev_passage_plan_id != 'null':
+                    if current_passage_plan_id == int(prev_passage_plan_id) and plot_map_cfg:
+                        zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
+                        center = plot_map_cfg["layout"]["mapbox"]["center"]
+
+
+                trajectory_plot = dash.dcc.Graph(id={'component_id': 'passage_plan_id-plot-map'},
+                                                 figure=create_figure_boat_trajectory(passage_plan_id_df, density_by=feature,
+                                                                                      zoom_factor=zoom_factor,
+                                                                                      center=center),
                                                  style={
                                                      "width": "100%",
                                                      "height": "70%"
                                                  })
 
                 return [passage_plan_id_stats_table, trajectory_plot], json.dumps(passage_plan_id)
-            return None, json.dumps(None)
+            return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'passage_plan_id-plot-map'})],
+                             hidden=True)], json.dumps(None)
 
         @self._app.callback(
             [
@@ -671,7 +693,16 @@ class AISApp(WebApplication):
                 select_passage_plan_id_dropdown,
                 html.Br(),
                 select_feature_highlight_dropdown,
-                html.Div(id={"component_id": "passage_plan_id-stats"})
+                html.Div(id={"component_id": "passage_plan_id-stats"},
+                         children=[
+                             html.Div(
+                                 children=[
+                                     dash.dcc.Graph(id={'component_id': 'passage_plan_id-plot-map'})
+                                     ],
+                                 hidden=True
+                             )
+                            ]
+                )
             ]
             return Path(filename).name, data_preview, select_for_prediction, \
                 filename, True
