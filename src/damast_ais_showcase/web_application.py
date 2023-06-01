@@ -193,7 +193,7 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     return metadata
 
 
-def create_figure_boat_trajectory(data_df: vaex.DataFrame,
+def create_figure_trajectory(data_df: vaex.DataFrame,
                                   zoom_factor: float = 4,
                                   center: Optional[Dict[str, float]] = None,
                                   density_by: Optional[str] = None,
@@ -254,6 +254,23 @@ def create_figure_feature_correlation_heatmap(data_df: vaex.DataFrame) -> go.Fig
                      text_auto='.2f',
                      height=1000,
                      width=1000)
+
+def create_figure_data_preview_table(data_df: vaex.DataFrame, passage_plan_id: Optional[int] = None)  -> List[Any]:
+    if passage_plan_id:
+        data_df = data_df[data_df.passage_plan_id == passage_plan_id]
+
+    df = data_df[:500].to_pandas_df()
+    return [html.H3("Data Preview"),
+            dash_table.DataTable(
+            data=df.to_dict('records'),
+            columns=[{'id': c, 'name': c} for c in df.columns],
+            # https://dash.plotly.com/datatable/style
+            style_cell={'textAlign': 'center', 'padding': "5px"},
+            style_header={'backgroundColor': 'lightgray',
+                            'color': 'white',
+                            'fontWeight': 'bold'},
+            page_size=10
+        )]
 
 def count_number_of_messages(data: vaex.DataFrame) -> vaex.DataFrame:
     """Given a set of AIS messages, accumulate number of messages per passage_plan_id identifier"""
@@ -527,16 +544,18 @@ class AISApp(WebApplication):
         @self._app.callback(
             [
                 Output({'component_id': 'passage_plan_id-stats'}, 'children'),
-                Output('passage_plan_id', 'data')
+                Output('passage_plan_id', 'data'),
+                Output('data-preview', 'children')
             ],
             Input({'component_id': 'select-passage_plan_id-dropdown'}, 'value'),
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             State('data-filename', 'data'),
             State('passage_plan_id', 'data'),
             State({'component_id': 'passage_plan_id-plot-map'}, 'figure'),
+            State('data-preview', 'children'),
             prevent_initial_callback=True
         )
-        def select_passage_plan_id(passage_plan_id, feature, data_filename, prev_passage_plan_id, plot_map_cfg):
+        def select_passage_plan_id(passage_plan_id, feature, data_filename, prev_passage_plan_id, plot_map_cfg, current_data_preview):
             if passage_plan_id is not None:
                 current_passage_plan_id = int(passage_plan_id)
                 adf = AnnotatedDataFrame.from_file(data_filename)
@@ -572,17 +591,17 @@ class AISApp(WebApplication):
 
 
                 trajectory_plot = dash.dcc.Graph(id={'component_id': 'passage_plan_id-plot-map'},
-                                                 figure=create_figure_boat_trajectory(passage_plan_id_df, density_by=feature,
-                                                                                      zoom_factor=zoom_factor,
-                                                                                      center=center),
+                                                 figure=create_figure_trajectory(passage_plan_id_df, density_by=feature,
+                                                                                 zoom_factor=zoom_factor,
+                                                                                 center=center),
                                                  style={
                                                      "width": "100%",
                                                      "height": "70%"
                                                  })
 
-                return [passage_plan_id_stats_table, trajectory_plot], json.dumps(passage_plan_id)
+                return [passage_plan_id_stats_table, trajectory_plot], json.dumps(passage_plan_id), create_figure_data_preview_table(data_df=adf.dataframe, passage_plan_id=passage_plan_id)
             return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'passage_plan_id-plot-map'})],
-                             hidden=True)], json.dumps(None)
+                             hidden=True)], json.dumps(None), current_data_preview
 
         @self._app.callback(
             [
@@ -635,16 +654,7 @@ class AISApp(WebApplication):
                     state_data_filename, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
-            df = adf[:5].to_pandas_df()
-            data_preview_table = dash_table.DataTable(
-                data=df.to_dict('records'),
-                columns=[{'id': c, 'name': c} for c in df.columns],
-                # https://dash.plotly.com/datatable/style
-                style_cell={'textAlign': 'center', 'padding': "5px"},
-                style_header={'backgroundColor': 'lightgray',
-                              'color': 'white',
-                              'fontWeight': 'bold'}
-            )
+            data_preview_table = create_figure_data_preview_table(adf.dataframe)
 
             select_passage_plan_id_dropdown = dcc.Dropdown(
                 placeholder="Select passage plan for prediction",
@@ -652,6 +662,7 @@ class AISApp(WebApplication):
                 multi=False,
             )
 
+            df = adf[:5].to_pandas_df()
             feature_highlight_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c])]
             feature_highlight_options.append({'label': 'no highlighting', 'value': ''})
             select_feature_highlight_dropdown = dcc.Dropdown(
@@ -662,7 +673,8 @@ class AISApp(WebApplication):
             )
 
             min_messages = 0
-            max_messages = 10000
+            grouped = adf.groupby('passage_plan_id', agg={'sequence_length': 'count'})
+            max_messages = max(grouped.sequence_length.values)
             # markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
             filter_passage_plan_id_slider = dash.dcc.RangeSlider(id={'component_id': 'filter-passage_plan_id-min-max-length'},
                                                  min=min_messages, max=max_messages,
@@ -678,11 +690,6 @@ class AISApp(WebApplication):
                 self.log("No column 'passage_plan_id' in the dataframe - did you select the right data?",
                          level=WARNING,
                          dash_logger=dash_logger)
-
-            data_preview = [
-                html.H3("Data Preview"),
-                data_preview_table
-            ]
 
             select_for_prediction = [
                 html.H2("Select Vessel"),
@@ -704,7 +711,7 @@ class AISApp(WebApplication):
                             ]
                 )
             ]
-            return Path(filename).name, data_preview, select_for_prediction, \
+            return Path(filename).name, data_preview_table, select_for_prediction, \
                 filename, True
 
         @self._app.callback(
@@ -712,7 +719,7 @@ class AISApp(WebApplication):
             Output({'component_id': 'feature-correlation-map'}, 'children'),
             Input('data-filename', 'data')
         )
-        def update_data(state_data_filename):
+        def update_exploration_data(state_data_filename):
             if state_data_filename is None:
                 return [], []
 
