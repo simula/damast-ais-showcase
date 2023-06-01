@@ -11,7 +11,8 @@ from enum import Enum
 from pathlib import Path
 from timeit import default_timer as timer
 from tkinter import filedialog
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+from pandas.api.types import is_numeric_dtype
 
 import dash
 import diskcache
@@ -106,9 +107,13 @@ def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
     data_df = adf._dataframe.copy()
 
     histograms = []
-    min_value = data_df[column_name].min()
-    max_value = data_df[column_name].max()
-    counts = data_df.count(binby=data_df[column_name],
+    col = data_df[column_name]
+    if col.dtype == np.float16:
+        col = col.astype('float32')
+
+    min_value = col.min()
+    max_value = col.max()
+    counts = data_df.count(binby=col,
                            # limits=[0, 900000000],
                            shape=1000)
     unit_name = None
@@ -131,6 +136,8 @@ def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
 def create_div_statistic(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     data_df = adf._dataframe.copy()
     statistics = []
+    if data_df[column_name].dtype == np.float16:
+        data_df[column_name] = data_df[column_name].astype('float32')
     min_value = data_df.min(column_name)
     max_value = data_df.max(column_name)
     median_approx = data_df.median_approx(column_name)
@@ -163,7 +170,7 @@ def create_div_statistic(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
 def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     metadata = []
     try:
-        data = adf._metadata[column_name].to_dict()
+        data = dict(adf._metadata[column_name])
         metadata_table = dash_table.DataTable(
             id={'component_id': f'data-metadata-{column_name}'},
             data=[data],
@@ -186,24 +193,47 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     return metadata
 
 
-def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
+def create_figure_boat_trajectory(data_df: vaex.DataFrame, density_by: Optional[str] = None) -> go.Figure:
     """
-    Extract (lat, long) coordinates from dataframe and group them by MMSI.
+    Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
     NOTE: Assumes that the input data is sorted by in time
     """
-    input = {"lat": data_df["lat"].evaluate(),
-             "lon": data_df["lon"].evaluate(),
-             "mmsi": data_df["mmsi"].evaluate()}
-    fig = px.line_mapbox(input,
+    input_data = {
+        "lat": data_df["Latitude"].evaluate(),
+        "lon": data_df["Longitude"].evaluate(),
+        "passage_plan_id": data_df["passage_plan_id"].evaluate(),
+    }
+    fig = px.line_mapbox(input_data,
                          lat="lat", lon="lon",
-                         color="mmsi")
+                         color="passage_plan_id")
 
-    fig2 = px.density_mapbox(input,
-                             lat='lat',
-                             lon='lon',
-                             z='mmsi', radius=3)
+    if density_by and density_by in data_df.column_names:
+        # Ensure operation with float32 since float16 is not supported by vaex
+        data_df[density_by] = data_df[density_by].astype('float32')
+        scaler = vaex.ml.StandardScaler(features=[density_by])
+        # this will create a column 'standard_scaled_<feature-name>'
+        data_df = scaler.fit_transform(data_df)
+        normalized_column = f"standard_scaled_{density_by}"
 
-    fig.add_trace(fig2.data[0])
+        input_data[density_by] = data_df[density_by].evaluate()
+
+        radius = []
+        for x in data_df[normalized_column].evaluate():
+            value = x*10.0
+            if value < 1:
+                radius.append(1)
+            else:
+                radius.append(value)
+
+        fig2 = px.density_mapbox(input_data,
+                                lat='lat',
+                                lon='lon',
+                                color_continuous_scale="YlOrRd",
+                                #range_color=[0,10],
+                                z=density_by,
+                                radius=radius)
+
+        fig.add_trace(fig2.data[0])
     fig.update_coloraxes(showscale=False)
 
     fig.update_layout(height=1000,
@@ -211,10 +241,16 @@ def create_figure_boat_trajectory(data_df: vaex.DataFrame) -> go.Figure:
 
     return fig
 
+def create_figure_feature_correlation_heatmap(data_df: vaex.DataFrame) -> go.Figure:
+    df_correlations = data_df.to_pandas_df().corr(numeric_only=True)
+    return px.imshow(df_correlations,
+                     text_auto='.2f',
+                     height=1000,
+                     width=1000)
 
 def count_number_of_messages(data: vaex.DataFrame) -> vaex.DataFrame:
-    """Given a set of AIS messages, accumulate number of messages per mmsi identifier"""
-    return data.groupby("mmsi", agg="count")
+    """Given a set of AIS messages, accumulate number of messages per passage_plan_id identifier"""
+    return data.groupby("passage_plan_id", agg="count")
 
 
 class WebApplication:
@@ -463,48 +499,51 @@ class AISApp(WebApplication):
                                            })
             return Path(directory).stem, \
                 directory, \
-                [html.Div(id={'component_id': 'mmsi-selection'}), model_dropdown], \
+                [html.Div(id={'component_id': 'passage_plan_id-selection'}), model_dropdown], \
                 True  # Clear model_name
 
         @self._app.callback(
-            Output({'component_id': 'select-mmsi-dropdown'}, 'options'),
-            Input({'component_id': 'filter-mmsi-min-length'}, 'value'),
+            Output({'component_id': 'select-passage_plan_id-dropdown'}, 'options'),
+            Input({'component_id': 'filter-passage_plan_id-min-max-length'}, 'value'),
             State('data-filename', 'data'),
             prevent_initial_callbacks=True
         )
-        def filter_mmsi(min_length, data_filename):
+        def filter_passage_plan_id(min_max_length, data_filename):
+            min_length, max_length = min_max_length
             adf = AnnotatedDataFrame.from_file(data_filename)
-            messages_per_mmsi = adf.groupby("mmsi", agg="count")
-            filtered_mmsi = messages_per_mmsi[messages_per_mmsi["count"] > min_length]
-            selectable_mmsis = sorted(filtered_mmsi.mmsi.unique())
-            return selectable_mmsis
+            messages_per_passage_plan_id = adf.groupby("passage_plan_id", agg="count")
+            filtered_passage_plan_id = messages_per_passage_plan_id[messages_per_passage_plan_id["count"] > min_length]
+            filtered_passage_plan_id = filtered_passage_plan_id[filtered_passage_plan_id["count"] < max_length]
+            selectable_passage_plan_ids = sorted(filtered_passage_plan_id.passage_plan_id.unique())
+            return selectable_passage_plan_ids
 
         @self._app.callback(
             [
-                Output({'component_id': 'mmsi-stats'}, 'children'),
-                Output('mmsi', 'data')
+                Output({'component_id': 'passage_plan_id-stats'}, 'children'),
+                Output('passage_plan_id', 'data')
             ],
-            Input({'component_id': 'select-mmsi-dropdown'}, 'value'),
+            Input({'component_id': 'select-passage_plan_id-dropdown'}, 'value'),
+            Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             State('data-filename', 'data'),
         )
-        def select_mmsi(value, data_filename):
-            if value is not None:
-                current_mmsi = int(value)
+        def select_passage_plan_id(passage_plan_id, feature, data_filename):
+            if passage_plan_id is not None:
+                current_passage_plan_id = int(passage_plan_id)
                 adf = AnnotatedDataFrame.from_file(data_filename)
-                mmsi_df = adf[adf.mmsi == current_mmsi]
+                passage_plan_id_df = adf[adf.passage_plan_id == current_passage_plan_id]
 
-                mean_lat = mmsi_df.mean("lat")
-                mean_lon = mmsi_df.mean("lon")
-                var_lat = mmsi_df.var("lat")
-                var_lon = mmsi_df.var("lon")
-                length = mmsi_df.count()
+                mean_lat = passage_plan_id_df.mean("Latitude")
+                mean_lon = passage_plan_id_df.mean("Longitude")
+                var_lat = passage_plan_id_df.var("Latitude")
+                var_lon = passage_plan_id_df.var("Longitude")
+                length = passage_plan_id_df.count()
 
                 data = {"Length": length,
                         "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
                         "Lon": f"{mean_lon:.2f} +/- {var_lon:.3f}"
                         }
 
-                mmsi_stats_table = dash_table.DataTable(
+                passage_plan_id_stats_table = dash_table.DataTable(
                     data=[data],
                     columns=[{'id': c, 'name': c} for c in data.keys()],
                     # https://dash.plotly.com/datatable/style
@@ -513,36 +552,35 @@ class AISApp(WebApplication):
                                   'color': 'white',
                                   'fontWeight': 'bold'}
                 )
-
-                trajectory_plot = dash.dcc.Graph(id="mmsi-plot-map",
-                                                 figure=create_figure_boat_trajectory(mmsi_df),
+                trajectory_plot = dash.dcc.Graph(id="passage_plan_id-plot-map",
+                                                 figure=create_figure_boat_trajectory(passage_plan_id_df, density_by=feature),
                                                  style={
                                                      "width": "100%",
-                                                     "height": "30%"
+                                                     "height": "70%"
                                                  })
 
-                return [mmsi_stats_table, trajectory_plot], json.dumps(value)
+                return [passage_plan_id_stats_table, trajectory_plot], json.dumps(passage_plan_id)
             return None, json.dumps(None)
 
         @self._app.callback(
             [
                 Output('button-select-data-directory', 'children'),
                 Output('data-preview', 'children'),
-                Output('prediction-mmsi-selection', 'children'),
+                Output('prediction-passage_plan_id-selection', 'children'),
                 Output('data-filename', 'data'),
-                Output('mmsi', 'clear_data'),
+                Output('passage_plan_id', 'clear_data'),
             ],
             [
                 Input('button-select-data-directory', 'n_clicks'),
                 State('button-select-data-directory', 'children'),
-                State('prediction-mmsi-selection', 'children'),
+                State('prediction-passage_plan_id-selection', 'children'),
                 State('data-preview', 'children'),
                 State('data-filename', 'data'),
             ],
             prevent_initial_callbacks=True,
             log=True
         )
-        def update_data(n_clicks, state_data_button, state_prediction_mmsi_selection, state_data_preview,
+        def update_data(n_clicks, state_data_button, state_prediction_passage_plan_id_selection, state_data_preview,
                         state_data_filename, dash_logger: DashLogger):
             """
             Set the current data that shall be used for prediction
@@ -571,7 +609,7 @@ class AISApp(WebApplication):
                 filename = state_data_filename
 
             if filename == '' or not isinstance(filename, str):
-                return state_data_button, state_data_preview, state_prediction_mmsi_selection, \
+                return state_data_button, state_data_preview, state_prediction_passage_plan_id_selection, \
                     state_data_filename, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
@@ -586,25 +624,36 @@ class AISApp(WebApplication):
                               'fontWeight': 'bold'}
             )
 
-            select_mmsi_dropdown = dcc.Dropdown(
-                placeholder="Select MSSI for prediction",
-                id={'component_id': "select-mmsi-dropdown"},
+            select_passage_plan_id_dropdown = dcc.Dropdown(
+                placeholder="Select passage plan for prediction",
+                id={'component_id': "select-passage_plan_id-dropdown"},
+                multi=False,
+            )
+
+            feature_highlight_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c])]
+            feature_highlight_options.append({'label': 'no highlighting', 'value': ''})
+            select_feature_highlight_dropdown = dcc.Dropdown(
+                placeholder="Select a feature to highlight in the plot",
+                id={'component_id': "select-feature-highlight-dropdown"},
+                options=feature_highlight_options,
                 multi=False,
             )
 
             min_messages = 0
             max_messages = 10000
             # markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
-            filter_mmsi_slider = dash.dcc.Slider(id={'component_id': 'filter-mmsi-min-length'},
+            filter_passage_plan_id_slider = dash.dcc.RangeSlider(id={'component_id': 'filter-passage_plan_id-min-max-length'},
                                                  min=min_messages, max=max_messages,
-                                                 value=50,
+                                                 value=[0,max_messages],
+                                                 allowCross=False,
+                                                 tooltip={'placement': 'bottom', 'always_visible': True}
                                                  # marks={i: f"{int(10 ** i)}" for i in
                                                  #       markers},
                                                  )
-            if "mmsi" in df.columns:
-                select_mmsi_dropdown.options = sorted(adf.mmsi.unique())
+            if "passage_plan_id" in df.columns:
+                select_passage_plan_id_dropdown.options = sorted(adf.passage_plan_id.unique())
             else:
-                self.log("No column 'mmsi' in the dataframe - did you select the right data?",
+                self.log("No column 'passage_plan_id' in the dataframe - did you select the right data?",
                          level=WARNING,
                          dash_logger=dash_logger)
 
@@ -615,27 +664,37 @@ class AISApp(WebApplication):
 
             select_for_prediction = [
                 html.H2("Select Vessel"),
-                html.Div(id="mmsi-filter", children=[
-                    html.H3("Minimum sequence length"),
-                    filter_mmsi_slider
+                html.Div(id="passage_plan_id-filter", children=[
+                    html.H3("Minimum-Maximum sequence length"),
+                    filter_passage_plan_id_slider
                 ]),
-                html.H3("MMSI"),
-                select_mmsi_dropdown,
-                html.Div(id={"component_id": "mmsi-stats"})
+                select_passage_plan_id_dropdown,
+                html.Br(),
+                select_feature_highlight_dropdown,
+                html.Div(id={"component_id": "passage_plan_id-stats"})
             ]
             return Path(filename).name, data_preview, select_for_prediction, \
                 filename, True
 
         @self._app.callback(
             Output({'component_id': 'data-columns-dropdown'}, 'options'),
+            Output({'component_id': 'feature-correlation-map'}, 'children'),
             Input('data-filename', 'data')
         )
-        def update_data_column_dropdown(state_data_filename):
+        def update_data(state_data_filename):
             if state_data_filename is None:
-                return []
+                return [], []
 
             adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
-            return adf.column_names
+            feature_correlation_heatmap = dash.dcc.Graph(id='feature-correlation-heatmap',
+                           figure=create_figure_feature_correlation_heatmap(data_df=adf.dataframe),
+                           style={
+                               "width": "80%",
+                               "height": "75%"
+                           }
+            )
+
+            return adf.column_names, [feature_correlation_heatmap]
 
         @self._app.callback(
             Output('explore-dataset', 'children'),
@@ -687,7 +746,7 @@ class AISApp(WebApplication):
                 Input({'component_id': 'button-predict-with-model'}, 'n_clicks'),
                 State({'component_id': 'button-predict-with-model'}, 'children'),
                 State({'component_id': 'button-predict-with-model'}, 'style'),
-                State('mmsi', 'data'),  # current_mmsi
+                State('passage_plan_id', 'data'),  # current_passage_plan_id
                 State('prediction-job', 'data'),
                 State('prediction-thread-status', 'data'),
                 State('experiment-directory', 'data'),
@@ -698,7 +757,7 @@ class AISApp(WebApplication):
             log=True
         )
         def predict_with_model(n_clicks, button_label, button_style,
-                               mmsi,
+                               passage_plan_id,
                                predict_job, prediction_thread_status,
                                experiment_directory,
                                model_name,
@@ -707,7 +766,7 @@ class AISApp(WebApplication):
             """
             Handle the Button event on the predict button.
 
-            1. Trigger the execution of a prediction job for a particular mmsi
+            1. Trigger the execution of a prediction job for a particular passage_plan_id
 
             :param n_clicks:
             :param prediction_thread_status:
@@ -727,30 +786,30 @@ class AISApp(WebApplication):
                 self._job_scheduler.stop(job_dict["id"])
                 return predict_job
 
-            # If mmsi is not set - there is no need to trigger the prediction
-            if mmsi is None:
+            # If passage_plan_id is not set - there is no need to trigger the prediction
+            if passage_plan_id is None:
                 return predict_job
 
-            current_mmsi = json.loads(mmsi)
+            current_passage_plan_id = json.loads(passage_plan_id)
 
             if model_name is not None:
-                # 1. Get all mmsi based data from the dataframe
-                # 2. Allow to pick from an mmsi
+                # 1. Get all passage_plan_id based data from the dataframe
+                # 2. Allow to pick from an passage_plan_id
                 # 3. Create a job to request the prediction
                 start_time = timer()
 
                 adf = AnnotatedDataFrame.from_file(data_filename)
 
-                self.log(f"predict (mmsi: {current_mmsi}): load and apply state to dataframe",
+                self.log(f"predict (passage_plan_id: {current_passage_plan_id}): load and apply state to dataframe",
                          dash_logger=dash_logger)
                 DataProcessingPipeline.load_state(df=adf, dir=experiment_directory)
                 prepared_df = adf._dataframe
 
                 self.log("predict: loading dataframe and converting to pandas",
                          dash_logger=dash_logger)
-                df = prepared_df[prepared_df.mmsi == current_mmsi]
+                df = prepared_df[prepared_df.passage_plan_id == current_passage_plan_id]
                 if df.count() < 51:
-                    self.log(f"Data from MMSI ({current_mmsi}) is too short/has insufficient length",
+                    self.log(f"Data from passage_plan_id ({current_passage_plan_id}) is too short/has insufficient length",
                              level=WARNING,
                              dash_logger=dash_logger)
                     # RUN PREDICTION AND PRESENT THE RESULT -- ASYNC
@@ -763,7 +822,7 @@ class AISApp(WebApplication):
 
                 # Temporarily store this sequence to disk - so that the worker can pick it up
                 tmpdir = tempfile.mkdtemp(prefix='.damast-ais-showcase.')
-                tmpfile = Path(tmpdir) / f"mmsi-{current_mmsi}.hdf5"
+                tmpfile = Path(tmpdir) / f"passage_plan_id-{current_passage_plan_id}.hdf5"
                 df.export(tmpfile)
                 self.log(f"df: exported to {tmpfile}",
                          dash_logger=dash_logger)
@@ -776,8 +835,8 @@ class AISApp(WebApplication):
                 # The features and target which are used for prediction here - are part of the trained model.
                 # So we would have to get the information from the trained model to make this
                 # work properly
-                features = ["latitude_x", "longitude_x",
-                            "latitude_y", "longitude_y"]
+                features = ["Latitude_x", "Longitude_x",
+                            "Latitude_y", "Longitude_y"]
 
                 sequence_length = 50
                 # If there is any forecast at all
@@ -845,14 +904,14 @@ class AISApp(WebApplication):
         return dcc.Tab(label='Predict',
                        value="tab-predict",
                        children=[
-                           html.Div(id='prediction-mmsi-selection'),
+                           html.Div(id='prediction-passage_plan_id-selection'),
                            html.Div(id='prediction-trigger'),
                            html.Div(id='prediction-results'),
 
                            dcc.Store(id='experiment-directory', storage_type='session'),
                            dcc.Store(id='data-filename', storage_type="session"),
                            dcc.Store(id='model-name', storage_type="session"),
-                           dcc.Store(id='mmsi', storage_type='session'),
+                           dcc.Store(id='passage_plan_id', storage_type='session'),
                            # A store to trigger the prediction background job - with storage type
                            # memory, the data will be cleared with a refresh
                            dcc.Store(id='prediction-job', storage_type="session"),
@@ -861,30 +920,45 @@ class AISApp(WebApplication):
                        ])
 
     def tab_explore(self) -> dcc.Tab:
-        data_column_dropdown = dash.html.Div(children=[html.H3("Column"),
-                                                       dash.dcc.Dropdown(id={'component_id': "data-columns-dropdown"},
-                                                                         placeholder="Select a data column",
-                                                                         multi=True)],
-                                             style={
-                                                 "display": "inline-block",
-                                                 "width": "100%",
-                                             })
+        data_column_dropdown = dash.html.Div(
+            children=[html.H3("Column"),
+            dash.dcc.Dropdown(id={'component_id': "data-columns-dropdown"},
+                                placeholder="Select a data column",
+                                multi=True)],
+            style={
+                "display": "inline-block",
+                "width": "100%",
+            },
+        )
 
-        visualization_type_dropdown = dash.html.Div(children=[html.H3("Visualization Type"),
-                                                              dash.dcc.Dropdown(
-                                                                  id={'component_id': "data-visualization-dropdown"},
-                                                                  placeholder="Select a visualization type column",
-                                                                  multi=True,
-                                                                  options=[x for x in VisualizationType])
-                                                              ],
-                                                    style={
-                                                        "display": "inline-block",
-                                                        "width": "100%",
-                                                    })
+        visualization_type_dropdown = dash.html.Div(
+            children=[
+                html.H3("Visualization Type"),
+                dash.dcc.Dropdown(
+                    id={'component_id': "data-visualization-dropdown"},
+                    placeholder="Select a visualization type column",
+                    multi=True,
+                    options=list(VisualizationType)
+                    )
+                    ],
+            style={
+                "display": "inline-block",
+                "width": "100%",
+            },
+        )
+
+        # Allow to visualize the feature correlation table
+        dataset_stats = dash.html.Div(children=[
+            html.H3("Feature Correlations (numeric columns only)"),
+            html.Div(id={'component_id': 'feature-correlation-map'}),
+            html.Br(),
+        ])
+
         return dcc.Tab(label="Explore",
                        value="tab-explore",
                        children=[
                            html.Br(),
+                           dataset_stats,
                            data_column_dropdown,
                            visualization_type_dropdown,
                            html.Div(id='explore-dataset')
