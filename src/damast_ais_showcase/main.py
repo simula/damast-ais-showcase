@@ -1,14 +1,13 @@
-# Copyright (C) 2023 Jørgen S. Dokken
-#
+# Copyright (C) 2023 Simula Research Laboratory
 # SPDX-License-Identifier:     BSD 3-Clause
 
 import argparse
+import os
 from pathlib import Path
 from typing import Union
 
 import damast
 import vaex
-import os
 from damast.core.dataframe import AnnotatedDataFrame
 from damast.core.dataprocessing import PipelineElement
 from damast.core.datarange import CyclicMinMax
@@ -18,7 +17,7 @@ from damast_ais_showcase.web_application import AISApp
 
 
 class HDF5Export(PipelineElement):
-    filename: Path = None
+    filename: Path
 
     def __init__(self, filename: Union[str, Path]):
         super().__init__()

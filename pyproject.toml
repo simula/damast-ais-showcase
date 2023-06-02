@@ -30,10 +30,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "damast",
-    "dash",
+    "damast @ git+https://gitlab.com/simula-srl/damast@main",
+    "dash[diskcache]",
     "dash-extensions",
-    "dash-mantine-components"
+    "dash-mantine-components",
+    "dash-daq",
 ]
 [project.license]
 file = "LICENSE"
@@ -42,8 +43,6 @@ file = "LICENSE"
 homepage = "https://gitlab.com/simula-srl/damast-ais-showcase"
 documentation = "https://gitlab.com/simula-srl/damast-ais-showcase"
 repository = "https://gitlab.com/simula-srl/damast-ais-showcase"
-
-#[project.entry-points]
 
 [project.optional-dependencies]
 dev = [

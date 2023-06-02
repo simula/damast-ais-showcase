@@ -1,17 +1,39 @@
 FROM python:3.10-slim
-ENV DEB_PYTHON_INSTALL_LAYOUT=deb_system
 
-RUN apt-get update && \
-    apt-get install -q -y python3-pip
+RUN apt update
+RUN apt upgrade -y
 
-RUN python3 -m pip install --upgrade pip setuptools
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt install -y \
+            git graphviz tzdata locales sudo
+RUN echo "Europe/Oslo" > /etc/timezone
+RUN dpkg-reconfigure -f noninteractive tzdata
 
-RUN python3 -m pip install vaex dash numpy
+ENV LANG en_GB.UTF-8
+ENV LANGUAGE en_GB:en
+ENV SHELL /bin/bash
+RUN locale-gen $LANG
+RUN dpkg-reconfigure locales
 
-WORKDIR /root/script
-COPY data/ais_20200101.hdf5 .
-COPY data/mmsi2vesseltype.hdf5 .
-COPY main.py .
-COPY web_application.py .
+RUN apt install -y \
+            libtk8.6
+
+RUN useradd -ms /bin/bash docker
+RUN echo "docker ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+USER docker
+WORKDIR /home/docker
+
+RUN git config --global user.email ""
+RUN git config --global user.name "Damast CI User"
+
+ENV PATH=/home/docker/.local/bin:$PATH
+
+RUN git clone https://gitlab.com/simula-srl/damast-ais-showcase
+RUN pip install -e "damast-ais-showcase"
+RUN which damast-ais-showcase
 EXPOSE 8888/tcp
-ENTRYPOINT ["python3", "main.py", "--file=/root/script/ais_20200101.hdf5", "--mmsi-file=/root/script/mmsi2vesseltype.hdf5", "--port=8888"]
+
+# Use login shell (-l) in case we update .bashrc
+SHELL ["/bin/bash", "-l", "-c"]
+ENTRYPOINT ["/bin/bash"]
