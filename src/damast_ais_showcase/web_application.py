@@ -7,9 +7,10 @@ import tempfile
 import webbrowser
 from logging import DEBUG, INFO, WARNING, Logger, getLogger
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Union, Dict, List, Optional
 
 import dash
+import dash_uploader as du
 
 # Using dash_logger in combination with dash_mantine_components
 # https://community.plotly.com/t/logging-in-dash-logtransform/61173/17
@@ -27,6 +28,9 @@ _log.setLevel(DEBUG)
 
 cache = diskcache.Cache( Path(tempfile.gettempdir()) / "damast-ais-showcase-cache")
 background_callback_manager = DiskcacheManager(cache)
+
+
+DATA_UPLOAD_PATH = Path(tempfile.gettempdir()) / "damast-ais-showcase"
 
 
 def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
@@ -51,9 +55,13 @@ class WebApplication:
     _port: str
     _server: str
 
+    data_upload_path: Union[str, Path]
+
     def __init__(self,
                  header: str,
-                 server: str = "0.0.0.0", port: str = "8888"):
+                 server: str = "0.0.0.0",
+                 port: str = "8888",
+                 upload_path = DATA_UPLOAD_PATH):
 
         external_scripts = [
             "https://code.jquery.com/jquery-2.2.4.js"
@@ -70,6 +78,10 @@ class WebApplication:
         self._server = server
         self._layout = []
         self.set_header(header)
+
+        self.data_upload_path = upload_path
+        du.configure_upload(self._app, self.data_upload_path,
+                            use_upload_id=True)
 
     def set_header(self, header: str):
         self._layout.append(dash.html.Div(
@@ -118,48 +130,6 @@ class AISApp(WebApplication):
         self._log_messages = []
         self._job_scheduler = JobScheduler()
 
-        experiment_button = html.Button(children='Pick experiment',
-                                        id='button-select-experiment-directory',
-                                        n_clicks=0,
-                                        style={
-                                            "position": "relative",
-                                            "display": "inline-block",
-                                            "backgroundColor": "white",
-                                            "color": "darkgray",
-                                            "textAlign": "center",
-                                            "fontSize": "1.2em",
-                                            "width": "100%",
-                                            "borderStyle": "dashed",
-                                            "borderRadius": "5px",
-                                            "borderWidth": "1px",
-                                            "margin": "10px",
-                                        })
-
-        data_button = html.Button(children='Pick dataset',
-                                  id='button-select-data-directory',
-                                  n_clicks=0,
-                                  style={
-                                      "position": "relative",
-                                      "display": "inline-block",
-                                      "backgroundColor": "white",
-                                      "color": "darkgray",
-                                      "textAlign": "center",
-                                      "fontSize": "1.2em",
-                                      "width": "100%",
-                                      "borderStyle": "dashed",
-                                      "borderRadius": "5px",
-                                      "borderWidth": "1px",
-                                      "margin": "10px",
-                                  })
-
-        self.select_experiment = html.Div([
-            experiment_button,
-            # html.Div(dcc.Input(id='input-experiment-directory', type='hidden', value="<experiment folder>")),
-            html.Div(id='select-models'),
-            data_button,
-            html.Div(id='data-preview'),
-        ])
-
     def generate_layout(self):
         """Generate dashboard layout
         """
@@ -168,8 +138,6 @@ class AISApp(WebApplication):
 
         self._layout += [
             html.Div([
-                # upload,
-                self.select_experiment,
                 # Create an interval from which regular updates are trigger, e.g.,
                 # the logging console is updated - interval is set in milliseconds
                 dcc.Interval("update-interval", interval=1000),

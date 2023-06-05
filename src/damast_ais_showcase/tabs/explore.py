@@ -1,13 +1,14 @@
+import uuid
 import dash
 import dash_daq as daq
 from dash import dash_table, State
 from dash import dcc, Output, Input
 from dash import html
 
+import dash_uploader as du
 from dash_extensions.enrich import DashLogger
 from enum import Enum
-import tkinter
-from tkinter import filedialog
+
 import json
 from pathlib import Path
 
@@ -35,12 +36,25 @@ class ExploreTab:
     @classmethod
     def register_callbacks(cls, app: AISApp):
 
+        # FIXME: packing version 23.0 has no LegacyVersion
+        # which dash_uploader is still using
+        # It will set prevent_initial_call
+        import packaging
+        setattr(packaging.version, "LegacyVersion", float)
+
+        @du.callback(
+            Output({'component_id': 'explore-datasets-dropdown'}, 'options'),
+            id='explore-dataset-upload'
+        )
+        def upload(status: du.UploadStatus):
+            return { str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file()}
+
         @app.callback(
             Output('explore-dataset', 'children'),
             Input({'component_id': 'explore-data-visualization-dropdown'}, 'value'),
             Input({'component_id': 'explore-data-columns-dropdown'}, 'value'),
             Input('explore-passage_plan_id', 'data'),
-            State('explore-data-filename', 'data'),
+            State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             log=True
         )
         def update_explore_dataset(dropdown_data_visualization,
@@ -48,7 +62,7 @@ class ExploreTab:
                                    state_data_filename,
                                    dash_logger: DashLogger):
 
-            if state_data_filename is None or dropdown_data_visualization is None:
+            if not state_data_filename or not dropdown_data_visualization:
                 return []
 
             adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
@@ -90,11 +104,12 @@ class ExploreTab:
         @app.callback(
             Output({'component_id': 'explore-data-columns-dropdown'}, 'options'),
             Output({'component_id': 'feature-correlation-map'}, 'children'),
-            Input('explore-data-filename', 'data'),
+            Input({'component_id': 'explore-datasets-dropdown'}, 'value'),
             Input({'component_id': 'explore-data-columns-dropdown'}, 'value'),
         )
         def update_exploration_data(state_data_filename, state_data_columns):
-            if state_data_filename is None:
+
+            if not state_data_filename:
                 return [], []
 
 
@@ -121,10 +136,13 @@ class ExploreTab:
         @app.callback(
             Output({'component_id': 'select-explore-passage_plan_id-dropdown'}, 'options'),
             Input({'component_id': 'filter-explore-passage_plan_id-min-max-length'}, 'value'),
-            State('explore-data-filename', 'data'),
+            State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             prevent_initial_callbacks=True
         )
         def filter_passage_plan_id(min_max_length, data_filename):
+            if not data_filename:
+                return []
+
             min_length, max_length = min_max_length
             adf = AnnotatedDataFrame.from_file(data_filename)
             messages_per_passage_plan_id = adf.groupby("passage_plan_id", agg="count")
@@ -142,7 +160,7 @@ class ExploreTab:
             Input({'component_id': 'select-explore-passage_plan_id-dropdown'}, 'value'),
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             Input({'component_id': 'explore-radius-factor'}, 'value'),
-            State('explore-data-filename', 'data'),
+            State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             State('explore-passage_plan_id', 'data'),
             State({'component_id': 'explore-passage_plan_id-plot-map'}, 'figure'),
             State('explore-dataset-preview', 'children'),
@@ -205,24 +223,20 @@ class ExploreTab:
 
         @app.callback(
             [
-                Output('button-select-data-directory', 'children'),
                 Output('explore-dataset-preview', 'children'),
                 Output('explore-passage_plan_id-selection', 'children'),
-                Output('explore-data-filename', 'data'),
                 Output('explore-passage_plan_id', 'clear_data'),
             ],
             [
-                Input('button-select-data-directory', 'n_clicks'),
-                State('button-select-data-directory', 'children'),
+                Input({'component_id': 'explore-datasets-dropdown'}, 'value'),
                 State('explore-passage_plan_id-selection', 'children'),
                 State('explore-dataset-preview', 'children'),
-                State('explore-data-filename', 'data'),
             ],
             prevent_initial_callbacks=True,
             log=True
         )
-        def update_data(n_clicks, state_data_button, state_prediction_passage_plan_id_selection, state_data_preview,
-                        state_data_filename, dash_logger: DashLogger):
+        def update_data(explore_data_filename, state_prediction_passage_plan_id_selection, state_data_preview,
+                        dash_logger: DashLogger):
             """
             Set the current data that shall be used for prediction
 
@@ -231,27 +245,9 @@ class ExploreTab:
             :param state_data_preview:
             :return:
             """
-            filename = ''
-            if n_clicks > 0:
-                initial_directory = str(Path().resolve())
-                if state_data_filename is not None:
-                    initial_directory = str(Path(state_data_filename).parent)
-
-                root = tkinter.Tk()
-                root.withdraw()
-                result_filename = filedialog.askopenfilename(title="Select data files",
-                                                             initialdir=initial_directory,
-                                                             filetypes=[('HDF5', '*.hdf5'), ('H5', '*.h5')])
-                if isinstance(result_filename, str):
-                    filename = result_filename
-
-                root.destroy()
-            else:
-                filename = state_data_filename
-
-            if filename == '' or not isinstance(filename, str):
-                return state_data_button, state_data_preview, state_prediction_passage_plan_id_selection, \
-                    state_data_filename, False
+            filename = explore_data_filename
+            if not filename or filename == '' or not isinstance(filename, str):
+                return state_data_preview, state_prediction_passage_plan_id_selection, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             data_preview_table = create_figure_data_preview_table(adf.dataframe)
@@ -321,8 +317,7 @@ class ExploreTab:
                             ]
                 )
             ]
-            return Path(filename).name, data_preview_table, select_for_prediction, \
-                filename, True
+            return data_preview_table, select_for_prediction, True
 
 
 
@@ -330,6 +325,18 @@ class ExploreTab:
     @classmethod
     def create(cls, app: AISApp) -> dcc.Tab:
         cls.register_callbacks(app)
+
+        datasets_dropdown = html.Div(
+            children=[html.H3("Available datasets"),
+            dcc.Dropdown(id={'component_id': "explore-datasets-dropdown"},
+                         options={ str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file()},
+                         placeholder="Select a dataset",
+                         multi=False)],
+            style={
+                "display": "inline-block",
+                "width": "100%",
+            },
+        )
 
         data_column_dropdown = html.Div(
             children=[html.H3("Column"),
@@ -369,6 +376,33 @@ class ExploreTab:
                        value="tab-explore",
                        children=[
                            html.Br(),
+                           html.Div(id='explore-upload',
+                                    children=[du.Upload(
+                                        text="Drag and drop to upload dataset",
+                                        text_completed='',
+                                        id='explore-dataset-upload',
+                                        max_file_size=10000, # 10 000 Mb,
+                                        cancel_button=True,
+                                        pause_button=True,
+                                        filetypes=['h5', 'hdf5'],
+                                        upload_id='datasets',
+                                        max_files=1,
+                                    ),
+                                    ],
+                                    style={
+                                            "position": "relative",
+                                            "display": "inline-block",
+                                            "backgroundColor": "white",
+                                            "color": "darkgray",
+                                            "textAlign": "center",
+                                            "fontSize": "1.2em",
+                                            "width": "100%",
+                                            "borderStyle": "dashed",
+                                            "borderRadius": "5px",
+                                            "borderWidth": "1px",
+                                            "margin": "10px",
+                                    }),
+                           datasets_dropdown,
                            html.Div(id='explore-passage_plan_id-selection'),
                            html.Div(id='explore-dataset-preview'),
                            dataset_stats,

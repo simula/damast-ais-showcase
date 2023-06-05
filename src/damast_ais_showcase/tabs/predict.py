@@ -435,9 +435,54 @@ class PredictionTab:
     @classmethod
     def create(cls, app: AISApp) -> dcc.Tab:
         cls.register_callbacks(app=app)
+
+        experiment_button = html.Button(children='Pick experiment',
+                                        id='button-select-experiment-directory',
+                                        n_clicks=0,
+                                        style={
+                                            "position": "relative",
+                                            "display": "inline-block",
+                                            "backgroundColor": "white",
+                                            "color": "darkgray",
+                                            "textAlign": "center",
+                                            "fontSize": "1.2em",
+                                            "width": "100%",
+                                            "borderStyle": "dashed",
+                                            "borderRadius": "5px",
+                                            "borderWidth": "1px",
+                                            "margin": "10px",
+                                        })
+
+        data_button = html.Button(children='Pick dataset',
+                                  id='button-select-data-directory',
+                                  n_clicks=0,
+                                  style={
+                                      "position": "relative",
+                                      "display": "inline-block",
+                                      "backgroundColor": "white",
+                                      "color": "darkgray",
+                                      "textAlign": "center",
+                                      "fontSize": "1.2em",
+                                      "width": "100%",
+                                      "borderStyle": "dashed",
+                                      "borderRadius": "5px",
+                                      "borderWidth": "1px",
+                                      "margin": "10px",
+                                  })
+
+        select_experiment = html.Div([
+            experiment_button,
+            # html.Div(dcc.Input(id='input-experiment-directory', type='hidden', value="<experiment folder>")),
+            html.Div(id='select-models'),
+            data_button,
+            html.Div(id='data-preview'),
+        ])
+
+        
         return dcc.Tab(label='Predict',
                        value="tab-predict",
                        children=[
+                           select_experiment,
                            html.Div(id='prediction-passage_plan_id-selection'),
                            html.Div(id='prediction-data-preview'),
                            html.Div(id='prediction-trigger'),

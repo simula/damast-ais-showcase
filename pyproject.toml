@@ -35,6 +35,7 @@ dependencies = [
     "dash-extensions",
     "dash-mantine-components",
     "dash-daq",
+    "dash-uploader>=0.7.0a1",
 ]
 [project.license]
 file = "LICENSE"
