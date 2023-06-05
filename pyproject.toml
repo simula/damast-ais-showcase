@@ -30,6 +30,8 @@ classifiers = [
 ]
 
 dependencies = [
+    # 1.23.5 triggers stride related issue
+    "numpy<=1.23.4",
     "damast @ git+https://gitlab.com/simula-srl/damast@main",
     "dash[diskcache]",
     "dash-extensions",
