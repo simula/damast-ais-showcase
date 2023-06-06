@@ -70,7 +70,12 @@ class ExploreTab:
 
             # If a passage plan id has been selected, then limit the visualisation to this passage plan id
             if state_sequence_id and state_sequence_id != 'null':
-                current_sequence_id = int(state_sequence_id)
+                try:
+                    current_sequence_id = int(state_sequence_id)
+                except Exception:
+                    # Looks like this is a string based id
+                    current_sequence_id = state_sequence_id
+
                 adf._dataframe = adf.dataframe[adf.dataframe[state_sequence_id_column] == current_sequence_id]
 
             explore_dataset_children = []
@@ -179,7 +184,12 @@ class ExploreTab:
                                sequence_id_column,
                                ):
             if sequence_id is not None:
-                current_sequence_id = int(sequence_id)
+                try:
+                    current_sequence_id = int(sequence_id)
+                except ValueError:
+                    # Looks like the sequence id is a str
+                    current_sequence_id = sequence_id
+
                 adf = AnnotatedDataFrame.from_file(data_filename)
                 sequence_id_df = adf[adf.dataframe[sequence_id_column] == current_sequence_id]
 
@@ -207,7 +217,12 @@ class ExploreTab:
                 zoom_factor = 4
                 center = None
                 if prev_sequence_id and prev_sequence_id != 'null':
-                    if current_sequence_id == int(prev_sequence_id) and plot_map_cfg:
+                    try:
+                        prev_sequence_id = int(prev_sequence_id)
+                    except ValueError:
+                        pass
+
+                    if current_sequence_id == prev_sequence_id and plot_map_cfg:
                         zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
                         center = plot_map_cfg["layout"]["mapbox"]["center"]
 
