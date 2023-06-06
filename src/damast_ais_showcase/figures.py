@@ -117,7 +117,8 @@ def create_div_statistic(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
 def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     metadata = []
     try:
-        data = dict(adf._metadata[column_name])
+        # Ensure that values are converted to string for html presentation
+        data = {x: str(y) for x,y in dict(adf._metadata[column_name]).items()}
         metadata_table = dash_table.DataTable(
             id={'component_id': f'data-metadata-{column_name}'},
             data=[data],
@@ -141,11 +142,11 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
 
 
 def create_figure_trajectory(data_df: vaex.DataFrame,
-                                  zoom_factor: float = 4,
-                                  center: Optional[Dict[str, float]] = None,
-                                  radius_factor: float = 10.0,
-                                  density_by: Optional[str] = None,
-                                  ) -> go.Figure:
+                             zoom_factor: float = 4,
+                             center: Optional[Dict[str, float]] = None,
+                             radius_factor: float = 10.0,
+                             density_by: Optional[str] = None,
+                             ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
     NOTE: Assumes that the input data is sorted by in time
@@ -203,9 +204,9 @@ def create_figure_feature_correlation_heatmap(data_df: vaex.DataFrame) -> go.Fig
                      height=1000,
                      width=1000)
 
-def create_figure_data_preview_table(data_df: vaex.DataFrame, passage_plan_id: Optional[int] = None)  -> List[Any]:
-    if passage_plan_id:
-        data_df = data_df[data_df.passage_plan_id == passage_plan_id]
+def create_figure_data_preview_table(data_df: vaex.DataFrame, sequence_id_column: Optional[str] = None, sequence_id: Optional[int] = None)  -> List[Any]:
+    if sequence_id_column and sequence_id:
+        data_df = data_df[data_df[sequence_id_column] == sequence_id]
 
     df = data_df[:500].to_pandas_df()
     return [html.H3("Data Preview"),

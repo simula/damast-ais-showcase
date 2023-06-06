@@ -53,13 +53,14 @@ class ExploreTab:
             Output('explore-dataset', 'children'),
             Input({'component_id': 'explore-data-visualization-dropdown'}, 'value'),
             Input({'component_id': 'explore-data-columns-dropdown'}, 'value'),
-            Input('explore-passage_plan_id', 'data'),
+            Input('explore-sequence_id', 'data'),
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
+            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
             log=True
         )
         def update_explore_dataset(dropdown_data_visualization,
-                                   state_data_columns, state_passage_plan_id,
-                                   state_data_filename,
+                                   state_data_columns, state_sequence_id,
+                                   state_data_filename, state_sequence_id_column,
                                    dash_logger: DashLogger):
 
             if not state_data_filename or not dropdown_data_visualization:
@@ -68,9 +69,9 @@ class ExploreTab:
             adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
 
             # If a passage plan id has been selected, then limit the visualisation to this passage plan id
-            if state_passage_plan_id and state_passage_plan_id != 'null':
-                current_passage_plan_id = int(state_passage_plan_id)
-                adf._dataframe = adf.dataframe[adf.passage_plan_id == current_passage_plan_id]
+            if state_sequence_id and state_sequence_id != 'null':
+                current_sequence_id = int(state_sequence_id)
+                adf._dataframe = adf.dataframe[adf.dataframe[state_sequence_id_column] == current_sequence_id]
 
             explore_dataset_children = []
             for column_name in state_data_columns:
@@ -134,63 +135,66 @@ class ExploreTab:
             )]
 
         @app.callback(
-            Output({'component_id': 'select-explore-passage_plan_id-dropdown'}, 'options'),
-            Input({'component_id': 'filter-explore-passage_plan_id-min-max-length'}, 'value'),
+            Output({'component_id': 'select-explore-sequence_id-dropdown'}, 'options'),
+            Input({'component_id': 'filter-explore-sequence_id-min-max-length'}, 'value'),
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
+            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
             prevent_initial_callbacks=True
         )
-        def filter_passage_plan_id(min_max_length, data_filename):
-            if not data_filename:
+        def filter_by_sequence_id(min_max_length, data_filename, sequence_id_column):
+            if not data_filename or not sequence_id_column:
                 return []
 
             min_length, max_length = min_max_length
             adf = AnnotatedDataFrame.from_file(data_filename)
-            messages_per_passage_plan_id = adf.groupby("passage_plan_id", agg="count")
-            filtered_passage_plan_id = messages_per_passage_plan_id[messages_per_passage_plan_id["count"] > min_length]
-            filtered_passage_plan_id = filtered_passage_plan_id[filtered_passage_plan_id["count"] < max_length]
-            selectable_passage_plan_ids = sorted(filtered_passage_plan_id.passage_plan_id.unique())
-            return selectable_passage_plan_ids
+            messages_per_sequence_id = adf.groupby(sequence_id_column, agg="count")
+            filtered_sequence_id = messages_per_sequence_id[messages_per_sequence_id["count"] > min_length]
+            filtered_sequence_id = filtered_sequence_id[filtered_sequence_id["count"] < max_length]
+            selectable_sequence_ids = sorted(filtered_sequence_id[sequence_id_column].unique())
+            return selectable_sequence_ids
 
         @app.callback(
             [
-                Output({'component_id': 'explore-passage_plan_id-stats'}, 'children'),
-                Output('explore-passage_plan_id', 'data'),
+                Output({'component_id': 'explore-sequence_id-stats'}, 'children'),
+                Output('explore-sequence_id', 'data'),
                 Output('explore-dataset-preview', 'children')
             ],
-            Input({'component_id': 'select-explore-passage_plan_id-dropdown'}, 'value'),
+            Input({'component_id': 'select-explore-sequence_id-dropdown'}, 'value'),
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             Input({'component_id': 'explore-radius-factor'}, 'value'),
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
-            State('explore-passage_plan_id', 'data'),
-            State({'component_id': 'explore-passage_plan_id-plot-map'}, 'figure'),
+            State('explore-sequence_id', 'data'),
+            State({'component_id': 'explore-sequence_id-plot-map'}, 'figure'),
             State('explore-dataset-preview', 'children'),
+            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
             prevent_initial_callback=True
         )
-        def select_passage_plan_id(passage_plan_id,
-                                   feature,
-                                   radius_factor,
-                                   data_filename,
-                                   prev_passage_plan_id,
-                                   plot_map_cfg,
-                                   current_data_preview,
-                                   ):
-            if passage_plan_id is not None:
-                current_passage_plan_id = int(passage_plan_id)
+        def select_sequence_id(sequence_id,
+                               feature,
+                               radius_factor,
+                               data_filename,
+                               prev_sequence_id,
+                               plot_map_cfg,
+                               current_data_preview,
+                               sequence_id_column,
+                               ):
+            if sequence_id is not None:
+                current_sequence_id = int(sequence_id)
                 adf = AnnotatedDataFrame.from_file(data_filename)
-                passage_plan_id_df = adf[adf.passage_plan_id == current_passage_plan_id]
+                sequence_id_df = adf[adf.dataframe[sequence_id_column] == current_sequence_id]
 
-                mean_lat = passage_plan_id_df.mean("Latitude")
-                mean_lon = passage_plan_id_df.mean("Longitude")
-                var_lat = passage_plan_id_df.var("Latitude")
-                var_lon = passage_plan_id_df.var("Longitude")
-                length = passage_plan_id_df.count()
+                mean_lat = sequence_id_df.mean("Latitude")
+                mean_lon = sequence_id_df.mean("Longitude")
+                var_lat = sequence_id_df.var("Latitude")
+                var_lon = sequence_id_df.var("Longitude")
+                length = sequence_id_df.count()
 
                 data = {"Length": length,
                         "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
                         "Lon": f"{mean_lon:.2f} +/- {var_lon:.3f}"
                         }
 
-                passage_plan_id_stats_table = dash_table.DataTable(
+                sequence_id_stats_table = dash_table.DataTable(
                     data=[data],
                     columns=[{'id': c, 'name': c} for c in data.keys()],
                     # https://dash.plotly.com/datatable/style
@@ -202,13 +206,13 @@ class ExploreTab:
 
                 zoom_factor = 4
                 center = None
-                if prev_passage_plan_id and prev_passage_plan_id != 'null':
-                    if current_passage_plan_id == int(prev_passage_plan_id) and plot_map_cfg:
+                if prev_sequence_id and prev_sequence_id != 'null':
+                    if current_sequence_id == int(prev_sequence_id) and plot_map_cfg:
                         zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
                         center = plot_map_cfg["layout"]["mapbox"]["center"]
 
-                trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-passage_plan_id-plot-map'},
-                                                 figure=create_figure_trajectory(passage_plan_id_df, density_by=feature,
+                trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
+                                                 figure=create_figure_trajectory(sequence_id_df, density_by=feature,
                                                                                  zoom_factor=zoom_factor,
                                                                                  radius_factor=float(radius_factor),
                                                                                  center=center),
@@ -217,25 +221,64 @@ class ExploreTab:
                                                      "height": "70%"
                                                  })
 
-                return [passage_plan_id_stats_table, trajectory_plot], json.dumps(passage_plan_id), create_figure_data_preview_table(data_df=adf.dataframe, passage_plan_id=passage_plan_id)
-            return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'explore-passage_plan_id-plot-map'})],
+                return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_id), create_figure_data_preview_table(data_df=adf.dataframe,
+                                                                                                                             sequence_id_column=sequence_id_column,
+                                                                                                                             sequence_id=sequence_id)
+            return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'})],
                              hidden=True)], json.dumps(None), current_data_preview
+
+        @app.callback(
+            Output('explore-sequence_id-column', 'children'),
+            Input({'component_id': 'explore-datasets-dropdown'}, 'value'),
+            prevent_initial_callbacks=True,
+            log=True
+        )
+        def update_data(explore_data_filename,
+                        dash_logger: DashLogger):
+            """
+            Set the current data that shall be used for prediction
+            :return:
+            """
+            filename = explore_data_filename
+            options = {}
+            if filename and filename != '' and isinstance(filename, str):
+                adf = AnnotatedDataFrame.from_file(filename=filename)
+                for c in adf.column_names:
+                    label = c
+                    try:
+                        metadata = adf.metadata[c]
+                        if metadata.description != '':
+                            label += f" - {metadata.description}"
+                        options[c] = label
+                    except KeyError:
+                        pass
+
+            select_sequence_column_dropdown = dcc.Dropdown(
+                placeholder="Select column of sequence id",
+                id={'component_id': "explore-sequence_id-column-dropdown"},
+                multi=False,
+                options=options
+            )
+            return select_sequence_column_dropdown
+
 
         @app.callback(
             [
                 Output('explore-dataset-preview', 'children'),
-                Output('explore-passage_plan_id-selection', 'children'),
-                Output('explore-passage_plan_id', 'clear_data'),
+                Output('explore-sequence_id-selection', 'children'),
+                Output('explore-sequence_id', 'clear_data'),
             ],
             [
-                Input({'component_id': 'explore-datasets-dropdown'}, 'value'),
-                State('explore-passage_plan_id-selection', 'children'),
+                State({'component_id': 'explore-datasets-dropdown'}, 'value'),
+                Input({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
+                State('explore-sequence_id-selection', 'children'),
                 State('explore-dataset-preview', 'children'),
             ],
             prevent_initial_callbacks=True,
             log=True
         )
-        def update_data(explore_data_filename, state_prediction_passage_plan_id_selection, state_data_preview,
+        def update_data(explore_data_filename, explore_sequence_id_column,
+                        state_prediction_sequence_id_selection, state_data_preview,
                         dash_logger: DashLogger):
             """
             Set the current data that shall be used for prediction
@@ -247,14 +290,14 @@ class ExploreTab:
             """
             filename = explore_data_filename
             if not filename or filename == '' or not isinstance(filename, str):
-                return state_data_preview, state_prediction_passage_plan_id_selection, False
+                return state_data_preview, state_prediction_sequence_id_selection, False
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             data_preview_table = create_figure_data_preview_table(adf.dataframe)
 
-            select_passage_plan_id_dropdown = dcc.Dropdown(
-                placeholder="Select passage plan for prediction",
-                id={'component_id': "select-explore-passage_plan_id-dropdown"},
+            select_sequence_id_dropdown = dcc.Dropdown(
+                placeholder="Select sequence for prediction",
+                id={'component_id': "select-explore-sequence_id-dropdown"},
                 multi=False,
             )
 
@@ -278,10 +321,11 @@ class ExploreTab:
                                                        ])
 
             min_messages = 0
-            grouped = adf.groupby('passage_plan_id', agg={'sequence_length': 'count'})
+
+            grouped = adf.groupby(explore_sequence_id_column, agg={'sequence_length': 'count'})
             max_messages = max(grouped.sequence_length.values)
             # markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
-            filter_passage_plan_id_slider = dash.dcc.RangeSlider(id={'component_id': 'filter-explore-passage_plan_id-min-max-length'},
+            filter_sequence_id_slider = dash.dcc.RangeSlider(id={'component_id': 'filter-explore-sequence_id-min-max-length'},
                                                  min=min_messages, max=max_messages,
                                                  value=[0,max_messages],
                                                  allowCross=False,
@@ -289,28 +333,22 @@ class ExploreTab:
                                                  # marks={i: f"{int(10 ** i)}" for i in
                                                  #       markers},
                                                  )
-            if "passage_plan_id" in df.columns:
-                select_passage_plan_id_dropdown.options = sorted(adf.passage_plan_id.unique())
-            else:
-                app.log("No column 'passage_plan_id' in the dataframe - did you select the right data?",
-                         level=WARNING,
-                         dash_logger=dash_logger)
 
             select_for_prediction = [
-                html.H2("Select Vessel"),
-                html.Div(id="explore-passage_plan_id-filter", children=[
+                html.H2("Select sequence:"),
+                html.Div(id="explore-sequence_id-filter", children=[
                     html.H3("Minimum-Maximum sequence length"),
-                    filter_passage_plan_id_slider
+                    filter_sequence_id_slider
                 ]),
-                select_passage_plan_id_dropdown,
+                select_sequence_id_dropdown,
                 html.Br(),
                 select_feature_highlight_dropdown,
                 select_feature_highlight_radius,
-                html.Div(id={"component_id": "explore-passage_plan_id-stats"},
+                html.Div(id={"component_id": "explore-sequence_id-stats"},
                          children=[
                              html.Div(
                                  children=[
-                                     dash.dcc.Graph(id={'component_id': 'explore-passage_plan_id-plot-map'})
+                                     dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'})
                                      ],
                                  hidden=True
                              )
@@ -318,8 +356,6 @@ class ExploreTab:
                 )
             ]
             return data_preview_table, select_for_prediction, True
-
-
 
 
     @classmethod
@@ -403,7 +439,12 @@ class ExploreTab:
                                             "margin": "10px",
                                     }),
                            datasets_dropdown,
-                           html.Div(id='explore-passage_plan_id-selection'),
+                           html.Div(id='explore-sequence_id-column',
+                                    children=[
+                                        dcc.Dropdown(id={"component_id": "explore-sequence_id-column-dropdown"})
+                                    ]
+                           ),
+                           html.Div(id='explore-sequence_id-selection'),
                            html.Div(id='explore-dataset-preview'),
                            dataset_stats,
                            data_column_dropdown,
@@ -411,6 +452,6 @@ class ExploreTab:
                            html.Div(id='explore-dataset'),
 
                            dcc.Store(id='explore-data-filename', storage_type="session"),
-                           dcc.Store(id='explore-passage_plan_id', storage_type='session'),
+                           dcc.Store(id='explore-sequence_id', storage_type='session'),
                        ],
                        className="tab")
