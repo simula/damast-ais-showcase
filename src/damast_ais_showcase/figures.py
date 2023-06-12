@@ -145,7 +145,8 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                              zoom_factor: float = 4,
                              center: Optional[Dict[str, float]] = None,
                              radius_factor: float = 10.0,
-                             density_by: Optional[str] = None,
+                             densities_by: Optional[List[str]] = None,
+                             use_absolute_value: bool = True,
                              ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
@@ -160,33 +161,51 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                          lat="lat", lon="lon",
                          color="passage_plan_id")
 
-    if density_by and density_by in data_df.column_names:
-        # Ensure operation with float32 since float16 is not supported by vaex
-        data_df[density_by] = data_df[density_by].astype('float32')
-        scaler = vaex.ml.StandardScaler(features=[density_by])
-        # this will create a column 'standard_scaled_<feature-name>'
-        data_df = scaler.fit_transform(data_df)
-        normalized_column = f"standard_scaled_{density_by}"
+    if densities_by:
+        for density_by in densities_by:
+            if density_by not in data_df.column_names:
+                continue
+            
+            density_input_df = data_df.dropnan(column_names=[density_by])
+            # Ensure operation with float32 since float16 is not supported by vaex
+            density_input_df[density_by] = density_input_df[density_by].astype('float32')
+            
+            density_input_data = {
+                "lat": density_input_df["Latitude"].evaluate(),
+                "lon": density_input_df["Longitude"].evaluate(),
+                "passage_plan_id": density_input_df["passage_plan_id"].evaluate(),
+            }
+            if use_absolute_value:
+                density_input_df[density_by] = density_input_df[density_by].abs()
 
-        input_data[density_by] = data_df[density_by].evaluate()
+            scaler = vaex.ml.StandardScaler(features=[density_by])
+            # this will create a column 'standard_scaled_<feature-name>'
+            density_input_df = scaler.fit_transform(density_input_df)
+            normalized_column = f"standard_scaled_{density_by}"
 
-        radius = []
-        for x in data_df[normalized_column].evaluate():
-            value = x*radius_factor
-            if value < 1:
-                radius.append(1)
-            else:
-                radius.append(value)
+            density_input_data[density_by] = density_input_df[density_by].evaluate()
 
-        fig2 = px.density_mapbox(input_data,
-                                lat='lat',
-                                lon='lon',
-                                color_continuous_scale="YlOrRd",
-                                #range_color=[0,10],
-                                z=density_by,
-                                radius=radius)
+            radius = []
+            for x in density_input_df[normalized_column].evaluate():
+                if np.isnan(x):
+                    radius.append(1)
+                    continue
+                
+                value = x*radius_factor
+                if value < 1:
+                    radius.append(1)
+                else:
+                    radius.append(value)
 
-        fig.add_trace(fig2.data[0])
+            fig_feature = px.density_mapbox(density_input_data,
+                                    lat='lat',
+                                    lon='lon',
+                                    color_continuous_scale="YlOrRd",
+                                    #range_color=[0,10],
+                                    z=density_by,
+                                    radius=radius)
+
+            fig.add_trace(fig_feature.data[0])
     fig.update_coloraxes(showscale=False)
 
     fig.update_layout(height=1000,

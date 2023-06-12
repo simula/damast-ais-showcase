@@ -167,6 +167,7 @@ class ExploreTab:
             Input({'component_id': 'select-explore-sequence_id-dropdown'}, 'value'),
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             Input({'component_id': 'explore-radius-factor'}, 'value'),
+            Input({'component_id': 'explore-use-absolute-value'}, 'value'),
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             State('explore-sequence_id', 'data'),
             State({'component_id': 'explore-sequence_id-plot-map'}, 'figure'),
@@ -175,8 +176,9 @@ class ExploreTab:
             prevent_initial_callback=True
         )
         def select_sequence_id(sequence_id,
-                               feature,
+                               features,
                                radius_factor,
+                               use_absolute_value,
                                data_filename,
                                prev_sequence_id,
                                plot_map_cfg,
@@ -227,10 +229,11 @@ class ExploreTab:
                         center = plot_map_cfg["layout"]["mapbox"]["center"]
 
                 trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
-                                                 figure=create_figure_trajectory(sequence_id_df, density_by=feature,
+                                                 figure=create_figure_trajectory(sequence_id_df, densities_by=features,
                                                                                  zoom_factor=zoom_factor,
                                                                                  radius_factor=float(radius_factor),
-                                                                                 center=center),
+                                                                                 center=center,
+                                                                                 use_absolute_value=use_absolute_value),
                                                  style={
                                                      "width": "100%",
                                                      "height": "70%"
@@ -319,20 +322,23 @@ class ExploreTab:
             df = adf[:5].to_pandas_df()
             feature_highlight_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c])]
             feature_highlight_options.append({'label': 'no highlighting', 'value': ''})
+            # Allow to select multiple features to highlight
             select_feature_highlight_dropdown = dcc.Dropdown(
                 placeholder="Select a feature to highlight in the plot",
                 id={'component_id': "select-feature-highlight-dropdown"},
                 options=feature_highlight_options,
-                multi=False,
+                multi=True,
             )
-            select_feature_highlight_radius = html.Div(id="div-radius-scaling-factor",
+            select_feature_highlight_options = html.Div(id="div-feature-highlight-options",
                                                        children=[
                                                            html.H4("Highlight radius scaling factor:"),
                                                            daq.NumericInput(id={'component_id': 'explore-radius-factor'},
                                                                min=1.0,
                                                                max=25.0,
                                                                value=10.0),
-                                                        html.Br()
+                                                           html.H4("Use absolute values:"),
+                                                           daq.BooleanSwitch(id={'component_id': 'explore-use-absolute-value'}, on=True),
+                                                           html.Br()
                                                        ])
 
             min_messages = 0
@@ -358,7 +364,7 @@ class ExploreTab:
                 select_sequence_id_dropdown,
                 html.Br(),
                 select_feature_highlight_dropdown,
-                select_feature_highlight_radius,
+                select_feature_highlight_options,
                 html.Div(id={"component_id": "explore-sequence_id-stats"},
                          children=[
                              html.Div(
