@@ -1,9 +1,7 @@
 import uuid
 import dash
 import dash_daq as daq
-from dash import dash_table, State
-from dash import dcc, Output, Input
-from dash import html
+from dash import dash_table, State, dcc, Output, Input, html, ALL, MATCH, Patch
 
 import dash_uploader as du
 from dash_extensions.enrich import DashLogger
@@ -12,7 +10,7 @@ from enum import Enum
 import json
 from pathlib import Path
 
-from pandas.api.types import is_numeric_dtype
+from pandas.api.types import is_numeric_dtype, is_datetime64_ns_dtype
 from logging import WARNING
 
 from damast.core.dataframe import AnnotatedDataFrame
@@ -173,6 +171,7 @@ class ExploreTab:
             State({'component_id': 'explore-sequence_id-plot-map'}, 'figure'),
             State('explore-dataset-preview', 'children'),
             State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
+            State('explore-column-filter-state', 'data'),
             prevent_initial_callback=True
         )
         def select_sequence_id(sequence_id,
@@ -184,6 +183,7 @@ class ExploreTab:
                                plot_map_cfg,
                                current_data_preview,
                                sequence_id_column,
+                               filter_values,
                                ):
             if sequence_id is not None:
                 try:
@@ -279,6 +279,176 @@ class ExploreTab:
             )
             return select_sequence_column_dropdown
 
+        @app.callback(
+                Output({'component_id': 'explore-extra-filters'}, 'children'),
+                Input({'component_id': 'explore-dynamic-add-filter'}, 'n_clicks'),
+                State({'component_id': 'explore-datasets-dropdown'}, 'value'),
+                State({'component_id': 'explore-extra-filters'}, 'children'),
+                prevent_initial_callback=True
+            )
+        def add_filters(n_clicks, data_filename, extra_filters):
+            if n_clicks <= 0:
+                return []
+
+            filename = data_filename
+            if not filename or filename == '' or not isinstance(filename, str):
+                return []
+
+            adf = AnnotatedDataFrame.from_file(filename=filename)
+            df = adf[:5].to_pandas_df()
+
+            filter_columns_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c]) or is_datetime64_ns_dtype(df.dtypes[c])]
+
+            updated_extra_filters = extra_filters
+            new_filter = html.Div(
+                id={'component_id': 'filter-column-div', 'filter_id': n_clicks},
+                children=[
+                    html.Div(
+                        html.Button("-",
+                                    id={'component_id': 'explore-dynamic-remove-filter', 'filter_id': n_clicks},
+                                    n_clicks=0,
+                                    style={
+                                        'borderRadius': '5px',
+                                        'backgroundColor': 'white',
+                                        'fontSize': '0.8em'
+                                    }
+                                ),
+                        style={'display': 'inline-block', 'verticalAlign': 'middle'}
+                    ),
+                    html.Div(
+                        dcc.Dropdown(
+                            id={'component_id': 'explore-column-dropdown', 'filter_id': n_clicks},
+                            options=filter_columns_options,
+                            placeholder="Select column",
+                            multi=False,
+                        ),
+                        style={'display': 'inline-block', 'margin': '1em', 'verticalAlign': 'middle', 'width': '15%'}
+                    ),
+                    html.Div(id={'component_id' : 'explore-column-value-filter', 'filter_id': n_clicks},
+                             style={'display': 'inline-block', 'verticalAlign': 'middle', 'width': '80%'}),
+                    html.Br()
+                ],
+            )
+            updated_extra_filters.append(new_filter)
+            return updated_extra_filters
+
+        @app.callback(
+            Output({'component_id': 'explore-column-value-filter', 'filter_id': MATCH}, 'children'),
+            Input({'component_id': 'explore-column-dropdown', 'filter_id': MATCH }, 'value'),
+            State({'component_id': 'explore-column-dropdown', 'filter_id': MATCH }, 'id'),
+            State({'component_id': 'explore-datasets-dropdown'}, 'value'),
+            State({'component_id': 'explore-column-value-filter', 'filter_id': MATCH}, 'children'),
+            State('explore-column-filter-state', 'data'),
+            prevent_initial_callback=True
+        )
+        def create_filter(value, component_id, explore_data_filename, existing_value_filter, value_filter):
+            # Callback might fire although filter should not change
+            # and it should not be recreated
+            if value_filter:
+                cid = str(component_id['filter_id'])
+                if cid in value_filter and value_filter[cid]['column_name'] == value:
+                    return existing_value_filter
+
+            filename = explore_data_filename
+            if not value or not filename or filename == '' or not isinstance(filename, str):
+                return []
+
+            adf = AnnotatedDataFrame.from_file(filename=filename)
+
+            filter_id = component_id['filter_id']
+            dtype = adf[:5].to_pandas_df().dtypes[value]
+            if is_numeric_dtype(dtype):
+                min_value = min(adf[value].min(), 0)
+                max_value = adf[value].max()
+                filter_slider = dash.dcc.RangeSlider(
+                    id={'component_id': 'explore-column-filter-range', 'filter_id': filter_id },
+                    min=int(min_value), max=int(max_value)+1,
+                    value=[0,int(max_value)+1],
+                    allowCross=False,
+                    tooltip={'placement': 'bottom', 'always_visible': True}
+                )
+                return [filter_slider]
+            elif is_datetime64_ns_dtype(dtype):
+                min_value = adf[value].min()
+                max_value = adf[value].max()
+
+                date_picker = dcc.DatePickerRange(
+                    id={'component_id': 'explore-column-filter-range', 'filter_id': filter_id },
+                    min_date_allowed=min_value,
+                    max_date_allowed=max_value,
+                    initial_visible_month=min_value,
+                    end_date=max_value,
+                )
+                return [date_picker]
+            return html.Div(f"Column '{value}' is not numeric")
+
+        @app.callback(
+            Output('explore-column-filter-state', 'data'),
+            Input({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'value'),
+            Input({'component_id': 'explore-column-dropdown', 'filter_id': ALL}, 'value'),
+            State({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'id'),
+            State('explore-column-filter-state', 'data'),
+            prevent_initial_callback=True
+        )
+        def update_filter_slider_state(range_values, column_values, filter_ids, filter_state):
+            """Method to update regular slider components"""
+            state = filter_state if filter_state else {}
+            if filter_ids:
+                for i, cid in enumerate(filter_ids):
+                    state[cid['filter_id']] = {
+                        'value': range_values[i],
+                        'column_name': column_values[i]
+                    }
+            return state
+
+        @app.callback(
+            Output('explore-column-filter-state', 'data'),
+            Input({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'start_date'),
+            Input({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'end_date'),
+            Input({'component_id': 'explore-column-dropdown', 'filter_id': ALL}, 'value'),
+            State({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'id'),
+            State('explore-column-filter-state', 'data'),
+            prevent_initial_callback=True
+        )
+        def update_filter_date_state(start_dates, end_dates, column_values, filter_ids, filter_state):
+            """Method to update state from time picker"""
+            state = filter_state if filter_state else {}
+            if filter_ids:
+                for i, cid in enumerate(filter_ids):
+                    state[cid['filter_id']] = {
+                        'value': [str(start_dates[i]), str(end_dates[i])],
+                        'column_name': column_values[i]
+                    }
+            return state
+
+
+        @app.callback(
+                    Output({'component_id': 'explore-extra-filters'}, 'children'),
+                    Output('explore-column-filter-state', 'data'),
+                    Input({'component_id': 'explore-dynamic-remove-filter', 'filter_id': ALL}, 'n_clicks'),
+                    Input({'component_id': 'explore-dynamic-remove-filter', 'filter_id': ALL}, 'id'),
+                    State({'component_id': 'explore-extra-filters'}, 'children'),
+                    State('explore-column-filter-state', 'data'),
+                    prevent_initial_callback=True
+                )
+        def remove_filter(n_clicks, ids, extra_filters, filter_state):
+            if not any(n_clicks):
+                return extra_filters, filter_state
+
+            remove_ids = []
+            for idx, x in enumerate(ids):
+                if n_clicks[idx]:
+                    remove_ids.append(x['filter_id'])
+
+            updated_filter_state = { x: y for x,y in filter_state.items() if int(x) not in remove_ids}
+            filters = []
+            for f in extra_filters:
+                filter_column_div = f['props']
+                cid = filter_column_div['id']
+                # check if this should be removed
+                if 'filter_id' in cid and int(cid['filter_id']) not in remove_ids:
+                    filters.append(f)
+            return filters, updated_filter_state
 
         @app.callback(
             [
@@ -314,7 +484,7 @@ class ExploreTab:
             data_preview_table = create_figure_data_preview_table(adf.dataframe)
 
             select_sequence_id_dropdown = dcc.Dropdown(
-                placeholder="Select sequence for prediction",
+                placeholder="Select sequence for exploration",
                 id={'component_id': "select-explore-sequence_id-dropdown"},
                 multi=False,
             )
@@ -331,15 +501,28 @@ class ExploreTab:
             )
             select_feature_highlight_options = html.Div(id="div-feature-highlight-options",
                                                        children=[
-                                                           html.H4("Highlight radius scaling factor:"),
-                                                           daq.NumericInput(id={'component_id': 'explore-radius-factor'},
-                                                               min=1.0,
-                                                               max=25.0,
-                                                               value=10.0),
-                                                           html.H4("Use absolute values:"),
-                                                           daq.BooleanSwitch(id={'component_id': 'explore-use-absolute-value'}, on=True),
-                                                           html.Br()
-                                                       ])
+                                                           html.H4("Highlight radius scaling factor:", style={'display': 'inline-block'}),
+                                                           html.Div(
+                                                                daq.NumericInput(id={'component_id': 'explore-radius-factor'},
+                                                                    min=1.0,
+                                                                    max=25.0,
+                                                                    value=10.0),
+                                                                style={'display': 'inline-block',
+                                                                       'verticalAlign': 'middle',
+                                                                       'padding': '2em',
+                                                                }
+                                                           ),
+                                                           html.H4("Use absolute values:", style={'display': 'inline-block'}),
+                                                           html.Div(
+                                                            daq.BooleanSwitch(
+                                                                id={'component_id': 'explore-use-absolute-value'},
+                                                                on=True,
+                                                           ),
+                                                           style={'display': 'inline-block', 'vertialAlign': 'middle'}
+                                                           )
+                                                           #html.Br()
+                                                       ],
+                                                )
 
             min_messages = 0
 
@@ -355,14 +538,42 @@ class ExploreTab:
                                                  #       markers},
                                                  )
 
-            select_for_prediction = [
-                html.H2("Select sequence:"),
-                html.Div(id="explore-sequence_id-filter", children=[
-                    html.H3("Minimum-Maximum sequence length"),
-                    filter_sequence_id_slider
-                ]),
-                select_sequence_id_dropdown,
+            select_for_exploration = [
                 html.Br(),
+                html.Br(),
+                html.Div(id="explore-filters",
+                    children=[
+                        html.H3("Filter sequence(s):"),
+                        html.Div(id="explore-sequence_id-filter",
+                                 children=[
+                                     html.H4("Minimum-Maximum sequence length"),
+                                     filter_sequence_id_slider
+                                ]),
+                        html.Div(id="explore-add-filters",
+                                 children=[
+                                     html.Br(),
+                                     html.Button("+",
+                                                 id={'component_id': 'explore-dynamic-add-filter'},
+                                                 n_clicks=0,
+                                                 style={
+                                                     'borderRadius': '5px',
+                                                     'backgroundColor': 'white',
+                                                     'fontSize': '1em'
+                                                 })
+                                 ]
+                        ),
+                        html.Div(id={'component_id': 'explore-extra-filters'},
+                                 n_clicks=None),
+                        html.Br(),
+                    ],
+                    #style={
+                    #    'borderStyle': 'dashed',
+                    #    'borderWidth': '1px',
+                    #    'borderRadius': '5px',
+                    #}
+                    ),
+                html.Br(),
+                select_sequence_id_dropdown,
                 select_feature_highlight_dropdown,
                 select_feature_highlight_options,
                 html.Div(id={"component_id": "explore-sequence_id-stats"},
@@ -376,7 +587,7 @@ class ExploreTab:
                             ]
                 )
             ]
-            return data_preview_table, select_for_prediction, True
+            return data_preview_table, select_for_exploration, True
 
 
     @classmethod
@@ -472,7 +683,7 @@ class ExploreTab:
                            visualization_type_dropdown,
                            html.Div(id='explore-dataset'),
 
-                           dcc.Store(id='explore-data-filename', storage_type="session"),
                            dcc.Store(id='explore-sequence_id', storage_type='session'),
+                           dcc.Store(id='explore-column-filter-state', storage_type='session'),
                        ],
                        className="tab")
