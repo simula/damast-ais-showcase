@@ -158,6 +158,18 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
     bounded_ids = data_df[sequence_id_column].unique()[:max_sequence_count]
     data_df = data_df.filter(data_df["passage_plan_id"].isin(bounded_ids))
 
+    # Wrap the data so that transitions over the antimeridian do not lead to
+    # map artifacts
+    data_df_pandas = data_df.to_pandas_df()
+    lat_crossings = pd.DataFrame(data_df_pandas.groupby(sequence_id_column)["Latitude"].apply(lambda x: x.min() < -89 or x.max() > 89).reset_index())
+    lon_crossings = pd.DataFrame(data_df_pandas.groupby(sequence_id_column)["Longitude"].apply(lambda x: x.min() < -179 or x.max() > 179).reset_index())
+
+    lat_crossings = lat_crossings[lat_crossings["Latitude"]][sequence_id_column].to_numpy()
+    data_df["Latitude"] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Latitude"]])
+
+    lon_crossings = lon_crossings[lon_crossings["Longitude"]][sequence_id_column].to_numpy()
+    data_df["Longitude"] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Longitude"]])
+
     input_data = {
         "lat": data_df["Latitude"].evaluate(),
         "lon": data_df["Longitude"].evaluate(),
