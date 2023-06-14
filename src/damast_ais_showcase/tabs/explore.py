@@ -244,7 +244,8 @@ class ExploreTab:
             [
                 Output({'component_id': 'explore-sequence_id-stats'}, 'children'),
                 Output('explore-sequence_id', 'data'),
-                Output('explore-dataset-preview', 'children')
+                Output('explore-dataset-preview', 'children'),
+                Output({'component_id': 'explore-sequence-batch-number'}, 'max')
             ],
             Input({'component_id': 'select-explore-sequence_id-dropdown'}, 'value'),
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
@@ -254,9 +255,10 @@ class ExploreTab:
             State('explore-sequence_id', 'data'),
             State({'component_id': 'explore-sequence_id-plot-map'}, 'figure'),
             State('explore-dataset-preview', 'children'),
-            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
-            State('explore-column-filter-state', 'data'),
-            State({'component_id': 'explore-max-sequence-count'},'value')
+            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'), # select one or many sequences by id
+            State('explore-column-filter-state', 'data'), # Status of of the column filters are stored here
+            Input({'component_id': 'explore-sequence-max-count'},'value'),
+            Input({'component_id': 'explore-sequence-batch-number'},'value'), # Select the batch number when a lot of sequence should be displayed
         )
         def select_sequence_id(sequence_ids,
                                features,
@@ -269,6 +271,7 @@ class ExploreTab:
                                sequence_id_column,
                                column_filter_state,
                                max_sequence_count,
+                               batch_number
                                ):
 
             current_sequence_ids = []
@@ -280,13 +283,13 @@ class ExploreTab:
                     current_sequence_ids = sequence_ids
 
                 adf = AnnotatedDataFrame.from_file(data_filename)
-                sequence_id_df = adf[adf.dataframe[sequence_id_column].isin(current_sequence_ids)]
+                groups_df = adf[adf.dataframe[sequence_id_column].isin(current_sequence_ids)]
 
-                mean_lat = sequence_id_df.mean("Latitude")
-                mean_lon = sequence_id_df.mean("Longitude")
-                var_lat = sequence_id_df.var("Latitude")
-                var_lon = sequence_id_df.var("Longitude")
-                length = sequence_id_df.count()
+                mean_lat = groups_df.mean("Latitude")
+                mean_lon = groups_df.mean("Longitude")
+                var_lat = groups_df.var("Latitude")
+                var_lon = groups_df.var("Longitude")
+                length = groups_df.count()
 
                 data = {"Length": length,
                         "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
@@ -308,18 +311,32 @@ class ExploreTab:
                 zoom_factor = 4
                 center = None
                 if prev_sequence_ids and prev_sequence_ids != 'null':
-                    prev_sequence_ids = [int(x) for x in json.loads(prev_sequence_ids)]
+                    prev_sequence_ids = json.loads(prev_sequence_ids)
+                    try:
+                        prev_sequence_ids = [int(x) for x in prev_sequence_ids]
+                    except ValueError:
+                        # Ids seem to be strings after all
+                        pass
+
                     if current_sequence_ids == prev_sequence_ids and plot_map_cfg:
                         zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
                         center = plot_map_cfg["layout"]["mapbox"]["center"]
 
+                #  Allow stepping through all using a paging-like mechanism
+                all_ids = sorted(groups_df['passage_plan_id'].unique())
+                partition_count = int(len(all_ids)/max_sequence_count)
+                if partition_count >= 2:
+                    bounded_ids = np.array_split(all_ids, partition_count)[batch_number]
+                    groups_df = groups_df[groups_df['passage_plan_id'].isin(bounded_ids)]
+
                 trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
-                                                 figure=create_figure_trajectory(sequence_id_df, densities_by=features,
+                                                 figure=create_figure_trajectory(groups_df,
+                                                                                 densities_by=features,
                                                                                  zoom_factor=zoom_factor,
-                                                                                 radius_factor=float(radius_factor),
+                                                                                 radius_factor=float(radius_factor/10.0),
                                                                                  center=center,
                                                                                  use_absolute_value=use_absolute_value,
-                                                                                 max_sequence_count=max_sequence_count),
+                                                                                 ),
                                                  style={
                                                      "width": "100%",
                                                      "height": "70%"
@@ -327,9 +344,9 @@ class ExploreTab:
 
                 return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_ids), create_figure_data_preview_table(data_df=adf.dataframe,
                                                                                                                              sequence_id_column=sequence_id_column,
-                                                                                                                             sequence_id=sequence_ids[0])
+                                                                                                                             sequence_id=sequence_ids[0]), max(0, partition_count-1)
             return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'})],
-                             hidden=True)], json.dumps(None), current_data_preview
+                             hidden=True)], json.dumps(None), current_data_preview, 0
 
         @app.callback(
             Output('explore-sequence_id-column', 'children'),
@@ -595,9 +612,10 @@ class ExploreTab:
                                                            html.H4("Highlight radius scaling factor:", style={'display': 'inline-block'}),
                                                            html.Div(
                                                                 daq.NumericInput(id={'component_id': 'explore-radius-factor'},
-                                                                    min=1.0,
-                                                                    max=25.0,
-                                                                    value=10.0),
+                                                                    min=1,
+                                                                    max=100.0,
+                                                                    value=25.0,
+                                                                ),
                                                                 style={'display': 'inline-block',
                                                                        'verticalAlign': 'middle',
                                                                        'padding': '2em',
@@ -612,15 +630,27 @@ class ExploreTab:
                                                                 style={
                                                                     'display': 'inline-block',
                                                                     'vertialAlign': 'middle',
-                                                                    'padding': '2em'
+                                                                    'padding': '4em'
                                                                 }
                                                            ),
-                                                           html.H4("Max passage plan count:", style={'display': 'inline-block'}),
+                                                           html.H4("Display trajectories:", style={'display': 'inline-block'}),
                                                            html.Div(
-                                                                daq.NumericInput(id={'component_id': 'explore-max-sequence-count'},
+                                                                daq.NumericInput(id={'component_id': 'explore-sequence-max-count'},
                                                                     min=1,
                                                                     max=100,
-                                                                    value=25),
+                                                                    value=10),
+                                                                style={
+                                                                    'display': 'inline-block',
+                                                                    'verticalAlign': 'middle',
+                                                                    'padding': '2em',
+                                                                }
+                                                           ),
+                                                           html.H4("Page:", style={'display': 'inline-block'}),
+                                                           html.Div(
+                                                                daq.NumericInput(id={'component_id': 'explore-sequence-batch-number'},
+                                                                    min=0,
+                                                                    max=1000,
+                                                                    value=0),
                                                                 style={
                                                                     'display': 'inline-block',
                                                                     'verticalAlign': 'middle',

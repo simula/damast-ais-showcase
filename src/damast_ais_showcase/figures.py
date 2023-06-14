@@ -149,15 +149,13 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                              radius_factor: float = 10.0,
                              densities_by: Optional[List[str]] = None,
                              use_absolute_value: bool = True,
-                             max_sequence_count = 25,
                              sequence_id_column = "passage_plan_id"
                              ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
     NOTE: Assumes that the input data is sorted by in time
     """
-    bounded_ids = data_df[sequence_id_column].unique()[:max_sequence_count]
-    data_df = data_df.filter(data_df["passage_plan_id"].isin(bounded_ids))
+    sorted_ids = sorted(data_df[sequence_id_column].unique())
 
     # Wrap the data so that transitions over the antimeridian do not lead to
     # map artifacts
@@ -178,7 +176,9 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
     }
     fig = px.line_mapbox(input_data,
                          lat="lat", lon="lon",
-                         color="sequence_id")
+                         color="sequence_id",
+                         category_orders={'sequence_id': sorted_ids},
+                         )
 
     if densities_by:
         for density_by in densities_by:
