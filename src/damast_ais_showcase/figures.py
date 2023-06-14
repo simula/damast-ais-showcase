@@ -5,6 +5,7 @@ import numpy as np
 import vaex
 from typing import Optional, List, Any, Dict
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 from damast.core.dataframe import AnnotatedDataFrame
 
@@ -192,6 +193,12 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                 "lon": density_input_df["Longitude"].evaluate(),
                 "sequence_id": density_input_df[sequence_id_column].evaluate(),
             }
+
+            # Add all information to the tooltip
+            for column in density_input_df.column_names:
+                if column not in ["Latitude", "Longitude", sequence_id_column] and not column.startswith("__"):
+                    density_input_data[column] = density_input_df[column].evaluate()
+
             if use_absolute_value:
                 density_input_df[density_by] = density_input_df[density_by].abs()
 
@@ -214,9 +221,11 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                 else:
                     radius.append(value)
 
+            hover_data = {k: True for k, _ in density_input_data.items()}
             fig_feature = px.density_mapbox(density_input_data,
                                     lat='lat',
                                     lon='lon',
+                                    hover_data=hover_data,
                                     color_continuous_scale="YlOrRd",
                                     #range_color=[0,10],
                                     z=density_by,

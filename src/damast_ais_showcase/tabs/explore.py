@@ -10,6 +10,7 @@ from enum import Enum
 import json
 from pathlib import Path
 import numpy as np
+from typing import List, Any
 
 from pandas.api.types import is_numeric_dtype, is_datetime64_ns_dtype
 from logging import WARNING
@@ -163,21 +164,14 @@ class ExploreTab:
                                                }
             )]
 
-        @app.callback(
-            Output({'component_id': 'select-explore-sequence_id-dropdown'}, 'options'),
-            Input({'component_id': 'filter-explore-sequence_id-min-max-length'}, 'value'),
-            Input('explore-column-filter-state', 'data'),
-            State({'component_id': 'explore-datasets-dropdown'}, 'value'),
-            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
-            prevent_initial_callbacks=True
-        )
-        def filter_by_sequence_id(min_max_length, column_filter_state, data_filename, sequence_id_column):
-            if not data_filename or not sequence_id_column:
-                return []
+        def apply_column_filter(adf: AnnotatedDataFrame, column_filter_state = {}):
+            """
+            Filter the annotated dataframe, based on the column filter state
 
-            min_length, max_length = min_max_length
-            adf = AnnotatedDataFrame.from_file(data_filename)
-
+            Args:
+                adf (AnnotatedDataFrame): _description_
+                column_filter_state (dict, optional): _description_. Defaults to {}.
+            """
             # Apply extra column filtering
             if column_filter_state:
                 for _, filter_status in column_filter_state.items():
@@ -195,11 +189,56 @@ class ExploreTab:
                                         .filter(adf.dataframe[column_name] <= max_value, mode='and')
                                     )
 
-            messages_per_sequence_id = adf.groupby(sequence_id_column, agg="count")
-            filtered_sequence_id = messages_per_sequence_id[messages_per_sequence_id["count"] > min_length]
-            filtered_sequence_id = filtered_sequence_id[filtered_sequence_id["count"] < max_length]
-            selectable_sequence_ids = sorted(filtered_sequence_id[sequence_id_column].unique())
-            return selectable_sequence_ids
+        def get_selectables(adf: AnnotatedDataFrame,
+                           group_column_name: str,
+                           column_filter_state={},
+                           min_length=0,
+                           max_length=None,
+        ) -> List[Any]:
+            """
+            Limit the selection to group that fulfill a particular critera
+
+
+            Args:
+                adf (AnnotatedDataFrame): _description_
+                sequence_id_column (str): _description_
+                column_filter_state (dict, optional): _description_. Defaults to {}.
+                min_length (int, optional): _description_. Defaults to 0.
+                max_length (_type_, optional): _description_. Defaults to None.
+
+            Returns:
+                _type_: _description_
+            """
+            apply_column_filter(adf=adf, column_filter_state=column_filter_state)
+
+            entries_per_group = adf.groupby(group_column_name, agg="count")
+            filtered_groups = entries_per_group[entries_per_group["count"] > min_length]
+            if max_length:
+                filtered_groups = filtered_groups[filtered_groups["count"] < max_length]
+            selectable_groups = sorted(filtered_groups[group_column_name].unique())
+            return selectable_groups
+
+        @app.callback(
+            Output({'component_id': 'select-explore-sequence_id-dropdown'}, 'options'),
+            Input({'component_id': 'filter-explore-sequence_id-min-max-length'}, 'value'),
+            Input('explore-column-filter-state', 'data'),
+            State({'component_id': 'explore-datasets-dropdown'}, 'value'),
+            State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
+            prevent_initial_callbacks=True
+        )
+        def filter_by_sequence_id(min_max_length, column_filter_state, data_filename, sequence_id_column):
+            if not data_filename or not sequence_id_column:
+                return []
+
+            min_length, max_length = min_max_length
+            adf = AnnotatedDataFrame.from_file(data_filename)
+
+            return get_selectables(adf=adf,
+                                   group_column_name=sequence_id_column,
+                                   column_filter_state=column_filter_state,
+                                   min_length=min_length,
+                                   max_length=max_length
+                                   )
 
         @app.callback(
             [
@@ -407,8 +446,9 @@ class ExploreTab:
             filter_id = component_id['filter_id']
             dtype = adf[:5].to_pandas_df().dtypes[value]
             if is_numeric_dtype(dtype):
+                # Ensure that a value range exists
                 min_value = min(adf[value].min(), 0)
-                max_value = adf[value].max()
+                max_value = max(adf[value].max(), 1)
                 filter_slider = dash.dcc.RangeSlider(
                     id={'component_id': 'explore-column-filter-range', 'filter_id': filter_id },
                     min=int(min_value), max=int(max_value)+1,
@@ -437,6 +477,7 @@ class ExploreTab:
             Input({'component_id': 'explore-column-dropdown', 'filter_id': ALL}, 'value'),
             State({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'id'),
             State('explore-column-filter-state', 'data'),
+            prevent_initial_callbacks=True,
         )
         def update_filter_slider_state(range_values, column_values, filter_ids, filter_state):
             """Method to update regular slider components"""
@@ -458,6 +499,7 @@ class ExploreTab:
             Input({'component_id': 'explore-column-dropdown', 'filter_id': ALL}, 'value'),
             State({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'id'),
             State('explore-column-filter-state', 'data'),
+            prevent_initial_callbacks=True,
         )
         def update_filter_date_state(start_dates, end_dates, column_values, filter_ids, filter_state):
             """Method to update state from time picker"""
@@ -589,9 +631,9 @@ class ExploreTab:
                                                 )
 
             min_messages = 0
-
             grouped = adf.groupby(explore_sequence_id_column, agg={'sequence_length': 'count'})
-            max_messages = max(grouped.sequence_length.values)
+            # Ensure that a minimal range exists
+            max_messages = max(max(grouped.sequence_length.values),1)
             # markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
             filter_sequence_id_slider = dash.dcc.RangeSlider(id={'component_id': 'filter-explore-sequence_id-min-max-length'},
                                                  min=min_messages, max=max_messages,
