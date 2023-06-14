@@ -4,6 +4,7 @@ from dash import dash_table, html, dcc
 import numpy as np
 import vaex
 from typing import Optional, List, Any, Dict
+import pandas as pd
 
 from damast.core.dataframe import AnnotatedDataFrame
 
@@ -147,33 +148,37 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                              radius_factor: float = 10.0,
                              densities_by: Optional[List[str]] = None,
                              use_absolute_value: bool = True,
+                             max_sequence_count = 25,
+                             sequence_id_column = "passage_plan_id"
                              ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
     NOTE: Assumes that the input data is sorted by in time
     """
+    bounded_ids = data_df[sequence_id_column].unique()[:max_sequence_count]
+    data_df = data_df.filter(data_df["passage_plan_id"].isin(bounded_ids))
+
     input_data = {
         "lat": data_df["Latitude"].evaluate(),
         "lon": data_df["Longitude"].evaluate(),
-        "passage_plan_id": data_df["passage_plan_id"].evaluate(),
+        "sequence_id": data_df[sequence_id_column].evaluate(),
     }
     fig = px.line_mapbox(input_data,
                          lat="lat", lon="lon",
-                         color="passage_plan_id")
+                         color="sequence_id")
 
     if densities_by:
         for density_by in densities_by:
             if density_by not in data_df.column_names:
                 continue
-            
+
             density_input_df = data_df.dropnan(column_names=[density_by])
-            # Ensure operation with float32 since float16 is not supported by vaex
             density_input_df[density_by] = density_input_df[density_by].astype('float32')
-            
+
             density_input_data = {
                 "lat": density_input_df["Latitude"].evaluate(),
                 "lon": density_input_df["Longitude"].evaluate(),
-                "passage_plan_id": density_input_df["passage_plan_id"].evaluate(),
+                "sequence_id": density_input_df[sequence_id_column].evaluate(),
             }
             if use_absolute_value:
                 density_input_df[density_by] = density_input_df[density_by].abs()
@@ -190,7 +195,7 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                 if np.isnan(x):
                     radius.append(1)
                     continue
-                
+
                 value = x*radius_factor
                 if value < 1:
                     radius.append(1)

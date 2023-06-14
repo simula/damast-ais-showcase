@@ -9,6 +9,7 @@ from enum import Enum
 
 import json
 from pathlib import Path
+import numpy as np
 
 from pandas.api.types import is_numeric_dtype, is_datetime64_ns_dtype
 from logging import WARNING
@@ -49,6 +50,7 @@ class ExploreTab:
 
         @app.callback(
             Output('explore-dataset', 'children'),
+            Output('explore-column-filter-state', 'data'),
             Input({'component_id': 'explore-data-visualization-dropdown'}, 'value'),
             Input({'component_id': 'explore-data-columns-dropdown'}, 'value'),
             Input('explore-sequence_id', 'data'),
@@ -60,9 +62,23 @@ class ExploreTab:
                                    state_data_columns, state_sequence_id,
                                    state_data_filename, state_sequence_id_column,
                                    dash_logger: DashLogger):
+            """
+            Update the dataset that will be explored
+
+            Args:
+                dropdown_data_visualization (_type_): _description_
+                state_data_columns (_type_): _description_
+                state_sequence_id (_type_): _description_
+                state_data_filename (_type_): _description_
+                state_sequence_id_column (_type_): _description_
+                dash_logger (DashLogger): _description_
+
+            Returns:
+                _type_: _description_
+            """
 
             if not state_data_filename or not dropdown_data_visualization:
-                return []
+                return [], {}
 
             adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
 
@@ -103,7 +119,7 @@ class ExploreTab:
                     )
                 )
 
-            return explore_dataset_children
+            return explore_dataset_children, {}
 
         @app.callback(
             Output({'component_id': 'explore-data-columns-dropdown'}, 'options'),
@@ -112,6 +128,16 @@ class ExploreTab:
             Input({'component_id': 'explore-data-columns-dropdown'}, 'value'),
         )
         def update_exploration_data(state_data_filename, state_data_columns):
+            """
+            Load the dataset from a given filename and update the the correlation heatmap
+
+            Args:
+                state_data_filename (_type_): _description_
+                state_data_columns (_type_): _description_
+
+            Returns:
+                _type_: _description_
+            """
 
             if not state_data_filename:
                 return [], []
@@ -140,16 +166,35 @@ class ExploreTab:
         @app.callback(
             Output({'component_id': 'select-explore-sequence_id-dropdown'}, 'options'),
             Input({'component_id': 'filter-explore-sequence_id-min-max-length'}, 'value'),
+            Input('explore-column-filter-state', 'data'),
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
             prevent_initial_callbacks=True
         )
-        def filter_by_sequence_id(min_max_length, data_filename, sequence_id_column):
+        def filter_by_sequence_id(min_max_length, column_filter_state, data_filename, sequence_id_column):
             if not data_filename or not sequence_id_column:
                 return []
 
             min_length, max_length = min_max_length
             adf = AnnotatedDataFrame.from_file(data_filename)
+
+            # Apply extra column filtering
+            if column_filter_state:
+                for _, filter_status in column_filter_state.items():
+                    column_name = filter_status['column_name']
+                    min_value = filter_status['value'][0]
+                    max_value = filter_status['value'][1]
+
+                    dtype = adf[:5].to_pandas_df().dtypes[column_name]
+                    if is_datetime64_ns_dtype(dtype):
+                        min_value = np.datetime64(min_value[:10])
+                        max_value = np.datetime64(max_value[:10])
+
+                    adf._dataframe = (adf.dataframe
+                                        .filter(adf.dataframe[column_name] >= min_value, mode='and')
+                                        .filter(adf.dataframe[column_name] <= max_value, mode='and')
+                                    )
+
             messages_per_sequence_id = adf.groupby(sequence_id_column, agg="count")
             filtered_sequence_id = messages_per_sequence_id[messages_per_sequence_id["count"] > min_length]
             filtered_sequence_id = filtered_sequence_id[filtered_sequence_id["count"] < max_length]
@@ -172,28 +217,31 @@ class ExploreTab:
             State('explore-dataset-preview', 'children'),
             State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'),
             State('explore-column-filter-state', 'data'),
-            prevent_initial_callback=True
+            State({'component_id': 'explore-max-sequence-count'},'value')
         )
-        def select_sequence_id(sequence_id,
+        def select_sequence_id(sequence_ids,
                                features,
                                radius_factor,
                                use_absolute_value,
                                data_filename,
-                               prev_sequence_id,
+                               prev_sequence_ids,
                                plot_map_cfg,
                                current_data_preview,
                                sequence_id_column,
-                               filter_values,
+                               column_filter_state,
+                               max_sequence_count,
                                ):
-            if sequence_id is not None:
+
+            current_sequence_ids = []
+            if sequence_ids:
                 try:
-                    current_sequence_id = int(sequence_id)
+                    current_sequence_ids = [int(x) for x in sequence_ids]
                 except ValueError:
                     # Looks like the sequence id is a str
-                    current_sequence_id = sequence_id
+                    current_sequence_ids = sequence_ids
 
                 adf = AnnotatedDataFrame.from_file(data_filename)
-                sequence_id_df = adf[adf.dataframe[sequence_id_column] == current_sequence_id]
+                sequence_id_df = adf[adf.dataframe[sequence_id_column].isin(current_sequence_ids)]
 
                 mean_lat = sequence_id_df.mean("Latitude")
                 mean_lon = sequence_id_df.mean("Longitude")
@@ -216,15 +264,13 @@ class ExploreTab:
                                   'fontWeight': 'bold'}
                 )
 
+                # Ensure that the mapbox remains centered where it was before (when only an addition a column)
+                # is being highlighted
                 zoom_factor = 4
                 center = None
-                if prev_sequence_id and prev_sequence_id != 'null':
-                    try:
-                        prev_sequence_id = int(prev_sequence_id)
-                    except ValueError:
-                        pass
-
-                    if current_sequence_id == prev_sequence_id and plot_map_cfg:
+                if prev_sequence_ids and prev_sequence_ids != 'null':
+                    prev_sequence_ids = [int(x) for x in json.loads(prev_sequence_ids)]
+                    if current_sequence_ids == prev_sequence_ids and plot_map_cfg:
                         zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
                         center = plot_map_cfg["layout"]["mapbox"]["center"]
 
@@ -233,15 +279,16 @@ class ExploreTab:
                                                                                  zoom_factor=zoom_factor,
                                                                                  radius_factor=float(radius_factor),
                                                                                  center=center,
-                                                                                 use_absolute_value=use_absolute_value),
+                                                                                 use_absolute_value=use_absolute_value,
+                                                                                 max_sequence_count=max_sequence_count),
                                                  style={
                                                      "width": "100%",
                                                      "height": "70%"
                                                  })
 
-                return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_id), create_figure_data_preview_table(data_df=adf.dataframe,
+                return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_ids), create_figure_data_preview_table(data_df=adf.dataframe,
                                                                                                                              sequence_id_column=sequence_id_column,
-                                                                                                                             sequence_id=sequence_id)
+                                                                                                                             sequence_id=sequence_ids[0])
             return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'})],
                              hidden=True)], json.dumps(None), current_data_preview
 
@@ -284,7 +331,7 @@ class ExploreTab:
                 Input({'component_id': 'explore-dynamic-add-filter'}, 'n_clicks'),
                 State({'component_id': 'explore-datasets-dropdown'}, 'value'),
                 State({'component_id': 'explore-extra-filters'}, 'children'),
-                prevent_initial_callback=True
+                prevent_initial_callbacks=True
             )
         def add_filters(n_clicks, data_filename, extra_filters):
             if n_clicks <= 0:
@@ -339,12 +386,14 @@ class ExploreTab:
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             State({'component_id': 'explore-column-value-filter', 'filter_id': MATCH}, 'children'),
             State('explore-column-filter-state', 'data'),
-            prevent_initial_callback=True
+            prevent_initial_callbacks=True
         )
         def create_filter(value, component_id, explore_data_filename, existing_value_filter, value_filter):
             # Callback might fire although filter should not change
             # and it should not be recreated
             if value_filter:
+                # The filter dropdown value represents the column name - if that changed
+                # the range selection component needs to be updated
                 cid = str(component_id['filter_id'])
                 if cid in value_filter and value_filter[cid]['column_name'] == value:
                     return existing_value_filter
@@ -388,17 +437,18 @@ class ExploreTab:
             Input({'component_id': 'explore-column-dropdown', 'filter_id': ALL}, 'value'),
             State({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'id'),
             State('explore-column-filter-state', 'data'),
-            prevent_initial_callback=True
         )
         def update_filter_slider_state(range_values, column_values, filter_ids, filter_state):
             """Method to update regular slider components"""
             state = filter_state if filter_state else {}
             if filter_ids:
                 for i, cid in enumerate(filter_ids):
-                    state[cid['filter_id']] = {
-                        'value': range_values[i],
-                        'column_name': column_values[i]
-                    }
+                    value = range_values[i]
+                    if value:
+                        state[str(cid['filter_id'])] = {
+                            'value': value,
+                            'column_name': column_values[i]
+                        }
             return state
 
         @app.callback(
@@ -408,7 +458,6 @@ class ExploreTab:
             Input({'component_id': 'explore-column-dropdown', 'filter_id': ALL}, 'value'),
             State({'component_id': 'explore-column-filter-range', 'filter_id': ALL}, 'id'),
             State('explore-column-filter-state', 'data'),
-            prevent_initial_callback=True
         )
         def update_filter_date_state(start_dates, end_dates, column_values, filter_ids, filter_state):
             """Method to update state from time picker"""
@@ -429,7 +478,7 @@ class ExploreTab:
                     Input({'component_id': 'explore-dynamic-remove-filter', 'filter_id': ALL}, 'id'),
                     State({'component_id': 'explore-extra-filters'}, 'children'),
                     State('explore-column-filter-state', 'data'),
-                    prevent_initial_callback=True
+                    prevent_initial_callbacks=True
                 )
         def remove_filter(n_clicks, ids, extra_filters, filter_state):
             if not any(n_clicks):
@@ -486,7 +535,7 @@ class ExploreTab:
             select_sequence_id_dropdown = dcc.Dropdown(
                 placeholder="Select sequence for exploration",
                 id={'component_id': "select-explore-sequence_id-dropdown"},
-                multi=False,
+                multi=True,
             )
 
             df = adf[:5].to_pandas_df()
@@ -514,13 +563,28 @@ class ExploreTab:
                                                            ),
                                                            html.H4("Use absolute values:", style={'display': 'inline-block'}),
                                                            html.Div(
-                                                            daq.BooleanSwitch(
-                                                                id={'component_id': 'explore-use-absolute-value'},
-                                                                on=True,
+                                                                daq.BooleanSwitch(
+                                                                    id={'component_id': 'explore-use-absolute-value'},
+                                                                    on=True,
+                                                                ),
+                                                                style={
+                                                                    'display': 'inline-block',
+                                                                    'vertialAlign': 'middle',
+                                                                    'padding': '2em'
+                                                                }
                                                            ),
-                                                           style={'display': 'inline-block', 'vertialAlign': 'middle'}
-                                                           )
-                                                           #html.Br()
+                                                           html.H4("Max passage plan count:", style={'display': 'inline-block'}),
+                                                           html.Div(
+                                                                daq.NumericInput(id={'component_id': 'explore-max-sequence-count'},
+                                                                    min=1,
+                                                                    max=100,
+                                                                    value=25),
+                                                                style={
+                                                                    'display': 'inline-block',
+                                                                    'verticalAlign': 'middle',
+                                                                    'padding': '2em',
+                                                                }
+                                                           ),
                                                        ],
                                                 )
 
@@ -562,8 +626,7 @@ class ExploreTab:
                                                  })
                                  ]
                         ),
-                        html.Div(id={'component_id': 'explore-extra-filters'},
-                                 n_clicks=None),
+                        html.Div(id={'component_id': 'explore-extra-filters'}),
                         html.Br(),
                     ],
                     #style={
