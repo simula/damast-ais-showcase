@@ -151,12 +151,21 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                              sequence_id_column = "passage_plan_id",
                              width=2000,
                              height=2000,
+                             sequence_reference_cols={'Latitude': 'pp_proj_lat', 'Longitude': 'pp_proj_lon'},
                              ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
     NOTE: Assumes that the input data is sorted by in time
+
+    Args:
+        sequence_reference_cols (Dict[str,str]): Dictionary containing the
+            reference for the actual sequence latitude / longitude columns which can
+            be displayed as a reference (ground-truth) trajectory
     """
     sorted_ids = sorted(data_df[sequence_id_column].unique())
+
+    ref_lat = sequence_reference_cols["Latitude"]
+    ref_lon = sequence_reference_cols["Longitude"]
 
     # Wrap the data so that transitions over the antimeridian do not lead to
     # map artifacts
@@ -166,9 +175,13 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
 
     lat_crossings = lat_crossings[lat_crossings["Latitude"]][sequence_id_column].to_numpy()
     data_df["Latitude"] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Latitude"]])
+    if ref_lat in data_df.column_names:
+        data_df[ref_lat] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lat]])
 
     lon_crossings = lon_crossings[lon_crossings["Longitude"]][sequence_id_column].to_numpy()
     data_df["Longitude"] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Longitude"]])
+    if ref_lon in data_df.column_names:
+        data_df[ref_lon] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lon]])
 
     input_data = {
         "sequence_id": data_df[sequence_id_column].evaluate(),
@@ -183,6 +196,16 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                          color="sequence_id",
                          category_orders={'sequence_id': sorted_ids},
                          )
+
+    # Allow to visualize a projection / reference line for the original trajectory
+    if len(sorted_ids) == 1 and ref_lat in input_data and ref_lon in input_data:
+        fig_pp = px.line_mapbox(input_data,
+                            lat=ref_lat, lon=ref_lon,
+                            color="sequence_id",
+                            category_orders={'sequence_id': sorted_ids},
+                            color_discrete_sequence=["orange"]
+                            )
+        fig.add_trace(fig_pp.data[0])
 
     if densities_by:
         for density_by in densities_by:
