@@ -51,7 +51,7 @@ class ExploreTab:
 
         @app.callback(
             Output('explore-dataset', 'children'),
-            Output('explore-column-filter-state', 'data'),
+            Output('explore-column-filter-state', 'clear_data'),
             Input({'component_id': 'explore-data-visualization-dropdown'}, 'value'),
             Input({'component_id': 'explore-data-columns-dropdown'}, 'value'),
             Input('explore-sequence_id', 'data'),
@@ -78,8 +78,8 @@ class ExploreTab:
                 _type_: _description_
             """
 
-            if not state_data_filename or not dropdown_data_visualization:
-                return [], {}
+            if not state_data_filename:
+                return [], True
 
             adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
 
@@ -93,34 +93,37 @@ class ExploreTab:
 
                 adf._dataframe = adf.dataframe[adf.dataframe[state_sequence_id_column] == current_sequence_id]
 
-            explore_dataset_children = []
-            for column_name in state_data_columns:
-                children = []
-                if VisualizationType.Histogram.value in dropdown_data_visualization:
-                    children.extend(create_div_histogram(adf=adf, column_name=column_name))
+            if dropdown_data_visualization:
+                explore_dataset_children = []
+                for column_name in state_data_columns:
+                    children = []
+                    if VisualizationType.Histogram.value in dropdown_data_visualization:
+                        children.extend(create_div_histogram(adf=adf, column_name=column_name))
 
-                if VisualizationType.Statistics.value in dropdown_data_visualization:
-                    children.extend(create_div_statistic(adf=adf, column_name=column_name))
+                    if VisualizationType.Statistics.value in dropdown_data_visualization:
+                        children.extend(create_div_statistic(adf=adf, column_name=column_name))
 
-                if VisualizationType.Metadata.value in dropdown_data_visualization:
-                    children.extend(create_div_metadata(adf=adf, column_name=column_name))
+                    if VisualizationType.Metadata.value in dropdown_data_visualization:
+                        children.extend(create_div_metadata(adf=adf, column_name=column_name))
 
-                explore_dataset_children.append(html.H3(f"Explore '{column_name}'"))
-                explore_dataset_children.append(
-                    html.Div(
-                        id={'component_id': f'explore-column-{column_name}'},
-                        children=children,
-                        style={
-                            'backgroundColor': 'lightblue',
-                            'borderRadius': '10px',
-                            'borderStyle': 'solid',
-                            'borderWidth': '3px',
-                            # 'margin': '10px'
-                        }
+                    explore_dataset_children.append(html.H3(f"Explore '{column_name}'"))
+                    explore_dataset_children.append(
+                        html.Div(
+                            id={'component_id': f'explore-column-{column_name}'},
+                            children=children,
+                            style={
+                                'backgroundColor': 'lightblue',
+                                'borderRadius': '10px',
+                                'borderStyle': 'solid',
+                                'borderWidth': '3px',
+                                # 'margin': '10px'
+                            }
+                        )
                     )
-                )
 
-            return explore_dataset_children, {}
+                return explore_dataset_children, False
+            else:
+                return [], False
 
         @app.callback(
             Output({'component_id': 'explore-data-columns-dropdown'}, 'options'),
@@ -569,6 +572,7 @@ class ExploreTab:
                 Output('explore-dataset-preview', 'children'),
                 Output('explore-sequence_id-selection', 'children'),
                 Output('explore-sequence_id', 'clear_data'),
+                Output('explore-column-filter-state', 'clear_data')
             ],
             [
                 State({'component_id': 'explore-datasets-dropdown'}, 'value'),
@@ -592,7 +596,7 @@ class ExploreTab:
             """
             filename = explore_data_filename
             if not filename or filename == '' or not isinstance(filename, str):
-                return state_data_preview, state_prediction_sequence_id_selection, False
+                return state_data_preview, state_prediction_sequence_id_selection, False, True
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
             data_preview_table = create_figure_data_preview_table(adf.dataframe)
@@ -755,9 +759,9 @@ class ExploreTab:
                                  hidden=True
                              )
                             ]
-                )
+                ),
             ]
-            return data_preview_table, select_for_exploration, True
+            return data_preview_table, select_for_exploration, True, True
 
 
     @classmethod
