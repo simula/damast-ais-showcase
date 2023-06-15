@@ -259,6 +259,8 @@ class ExploreTab:
             State('explore-column-filter-state', 'data'), # Status of of the column filters are stored here
             Input({'component_id': 'explore-sequence-max-count'},'value'),
             Input({'component_id': 'explore-sequence-batch-number'},'value'), # Select the batch number when a lot of sequence should be displayed
+            Input({'component_id': 'explore-plot-width'}, 'value'),
+            Input({'component_id': 'explore-plot-height'}, 'value'),
         )
         def select_sequence_id(sequence_ids,
                                features,
@@ -271,7 +273,9 @@ class ExploreTab:
                                sequence_id_column,
                                column_filter_state,
                                max_sequence_count,
-                               batch_number
+                               batch_number,
+                               plot_width,
+                               plot_height,
                                ):
 
             current_sequence_ids = []
@@ -308,7 +312,7 @@ class ExploreTab:
 
                 # Ensure that the mapbox remains centered where it was before (when only an addition a column)
                 # is being highlighted
-                zoom_factor = 4
+                zoom_factor = None
                 center = None
                 if prev_sequence_ids and prev_sequence_ids != 'null':
                     prev_sequence_ids = json.loads(prev_sequence_ids)
@@ -336,10 +340,12 @@ class ExploreTab:
                                                                                  radius_factor=float(radius_factor/10.0),
                                                                                  center=center,
                                                                                  use_absolute_value=use_absolute_value,
+                                                                                 width=plot_width,
+                                                                                 height=plot_height,
                                                                                  ),
                                                  style={
                                                      "width": "100%",
-                                                     "height": "70%"
+                                                     "height": "100%"
                                                  })
 
                 return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_ids), create_figure_data_preview_table(data_df=adf.dataframe,
@@ -659,6 +665,34 @@ class ExploreTab:
                                                            ),
                                                        ],
                                                 )
+            plot_options = html.Div(id="div-plot-options",
+                                                       children=[
+                                                           html.H4("Plot width in pixel:", style={'display': 'inline-block'}),
+                                                           html.Div(
+                                                                daq.NumericInput(id={'component_id': 'explore-plot-width'},
+                                                                    min=500,
+                                                                    max=5000,
+                                                                    value=2000),
+                                                                style={
+                                                                    'display': 'inline-block',
+                                                                    'verticalAlign': 'middle',
+                                                                    'padding': '2em',
+                                                                }
+                                                           ),
+                                                           html.H4("Plot height in pixel:", style={'display': 'inline-block'}),
+                                                           html.Div(
+                                                                daq.NumericInput(id={'component_id': 'explore-plot-height'},
+                                                                    min=500,
+                                                                    max=5000,
+                                                                    value=2000),
+                                                                style={
+                                                                    'display': 'inline-block',
+                                                                    'verticalAlign': 'middle',
+                                                                    'padding': '2em',
+                                                                }
+                                                           ),
+                                                       ],
+                                                )
 
             min_messages = 0
             grouped = adf.groupby(explore_sequence_id_column, agg={'sequence_length': 'count'})
@@ -711,6 +745,7 @@ class ExploreTab:
                 select_sequence_id_dropdown,
                 select_feature_highlight_dropdown,
                 select_feature_highlight_options,
+                plot_options,
                 html.Div(id={"component_id": "explore-sequence_id-stats"},
                          children=[
                              html.Div(

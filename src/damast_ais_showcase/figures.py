@@ -5,7 +5,6 @@ import numpy as np
 import vaex
 from typing import Optional, List, Any, Dict
 import pandas as pd
-from pandas.api.types import is_numeric_dtype
 
 from damast.core.dataframe import AnnotatedDataFrame
 
@@ -144,12 +143,14 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
 
 
 def create_figure_trajectory(data_df: vaex.DataFrame,
-                             zoom_factor: float = 4,
+                             zoom_factor: Optional[float] = None,
                              center: Optional[Dict[str, float]] = None,
                              radius_factor: float = 10.0,
                              densities_by: Optional[List[str]] = None,
                              use_absolute_value: bool = True,
-                             sequence_id_column = "passage_plan_id"
+                             sequence_id_column = "passage_plan_id",
+                             width=2000,
+                             height=2000,
                              ) -> go.Figure:
     """
     Extract (lat, long) coordinates from dataframe and group them by passage_plan_id.
@@ -170,12 +171,15 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
     data_df["Longitude"] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Longitude"]])
 
     input_data = {
-        "lat": data_df["Latitude"].evaluate(),
-        "lon": data_df["Longitude"].evaluate(),
         "sequence_id": data_df[sequence_id_column].evaluate(),
     }
+    # Add all information to the tooltip of the main line plot
+    for column in data_df.column_names:
+        if column not in [sequence_id_column] and not column.startswith("__"):
+            input_data[column] = data_df[column].evaluate()
+
     fig = px.line_mapbox(input_data,
-                         lat="lat", lon="lon",
+                         lat="Latitude", lon="Longitude",
                          color="sequence_id",
                          category_orders={'sequence_id': sorted_ids},
                          )
@@ -189,14 +193,11 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
             density_input_df[density_by] = density_input_df[density_by].astype('float32')
 
             density_input_data = {
-                "lat": density_input_df["Latitude"].evaluate(),
-                "lon": density_input_df["Longitude"].evaluate(),
                 "sequence_id": density_input_df[sequence_id_column].evaluate(),
             }
-
             # Add all information to the tooltip
-            for column in density_input_df.column_names:
-                if column not in ["Latitude", "Longitude", sequence_id_column] and not column.startswith("__"):
+            for column in data_df.column_names:
+                if column not in [sequence_id_column] and not column.startswith("__"):
                     density_input_data[column] = density_input_df[column].evaluate()
 
             if use_absolute_value:
@@ -223,8 +224,8 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
 
             hover_data = {k: True for k, _ in density_input_data.items()}
             fig_feature = px.density_mapbox(density_input_data,
-                                    lat='lat',
-                                    lon='lon',
+                                    lat='Latitude',
+                                    lon='Longitude',
                                     hover_data=hover_data,
                                     color_continuous_scale="YlOrRd",
                                     #range_color=[0,10],
@@ -232,28 +233,78 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                                     radius=radius)
 
             fig.add_trace(fig_feature.data[0])
+
     fig.update_coloraxes(showscale=False)
 
-    fig.update_layout(height=1000,
+    lat_mean = np.mean(input_data["Latitude"])
+    lon_mean = np.mean(input_data["Longitude"])
+
+    lon_min = np.min(input_data["Longitude"])
+    lon_max = np.max(input_data["Longitude"])
+
+    lat_min = np.min(input_data["Longitude"])
+    lat_max = np.max(input_data["Longitude"])
+
+    if not zoom_factor:
+        # Upon rendering a new trajectory (set)
+        # try to automatically set the zoom so that all
+        # trajectories are part of this visualized map
+        delta_lon = lon_max - lon_min
+        delta_lat = lat_max - lat_min
+        max_delta = max(delta_lat, delta_lon)
+        zoom_factor = max(11.5 - np.log(max_delta*40), 0)
+
+    fig.update_layout(height=height,
+                      width=width,
                       mapbox_style="open-street-map",
                       mapbox_zoom=zoom_factor)
+
     if center:
         fig.update_layout(mapbox_center=center)
+    else:
+        # If not center is given, then use the known mean values of the current data
+        fig.update_layout(mapbox_center={ 'lat': lat_mean, 'lon': lon_mean})
 
     return fig
 
 def create_figure_feature_correlation_heatmap(data_df: vaex.DataFrame) -> go.Figure:
+    """
+    Create a heatmap image with the correlations of all dataframe columns
+
+    Args:
+        data_df (vaex.DataFrame): _description_
+
+    Returns:
+        go.Figure: _description_
+    """
     df_correlations = data_df.to_pandas_df().corr(numeric_only=True)
     return px.imshow(df_correlations,
                      text_auto='.2f',
                      height=1000,
                      width=1000)
 
-def create_figure_data_preview_table(data_df: vaex.DataFrame, sequence_id_column: Optional[str] = None, sequence_id: Optional[int] = None)  -> List[Any]:
+def create_figure_data_preview_table(data_df: vaex.DataFrame,
+                                     sequence_id_column: Optional[str] = None,
+                                     sequence_id: Optional[int] = None,
+                                     upper_bound: int = 500,
+                                     page_size: int = 10)  -> List[Any]:
+    """
+    Create a table that show the data columns of the given dataframe
+
+    Args:
+        data_df (vaex.DataFrame): _description_
+        sequence_id_column (Optional[str], optional): _description_. Defaults to None.
+        sequence_id (Optional[int], optional): _description_. Defaults to None.
+        upper_bound (int): max number of rows.
+        page_size (int): number of rows to be shown on one page
+
+    Returns:
+        List[Any]: List of html object that shall be rendered
+    """
     if sequence_id_column and sequence_id:
         data_df = data_df[data_df[sequence_id_column] == sequence_id]
 
-    df = data_df[:500].to_pandas_df()
+    df = data_df[:upper_bound].to_pandas_df()
     return [html.H3("Data Preview"),
             dash_table.DataTable(
             data=df.to_dict('records'),
@@ -263,5 +314,5 @@ def create_figure_data_preview_table(data_df: vaex.DataFrame, sequence_id_column
             style_header={'backgroundColor': 'lightgray',
                             'color': 'white',
                             'fontWeight': 'bold'},
-            page_size=10
+            page_size=page_size
         )]
