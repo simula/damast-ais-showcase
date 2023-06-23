@@ -411,7 +411,10 @@ class ExploreTab:
 
             filter_columns_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c]) or is_datetime64_ns_dtype(df.dtypes[c])]
 
-            updated_extra_filters = extra_filters
+            if extra_filters is not None:
+                updated_extra_filters = extra_filters
+            else:
+                updated_extra_filters = []
             new_filter = html.Div(
                 id={'component_id': 'filter-column-div', 'filter_id': n_clicks},
                 children=[
