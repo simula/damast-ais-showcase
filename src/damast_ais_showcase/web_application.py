@@ -134,7 +134,7 @@ class AISApp(WebApplication):
         """Generate dashboard layout
         """
         from .tabs.explore import ExploreTab
-        from .tabs.predict import PredictionTab
+        #from .tabs.predict import PredictionTab
 
         self._layout += [
             html.Div([
