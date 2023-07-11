@@ -32,6 +32,8 @@ class VisualizationType(str, Enum):
     Statistics = "Statistics"
     Metadata = "Metadata"
 
+ALL_SEQUENCES_OPTION = "all"
+
 class ExploreTab:
     @classmethod
     def register_callbacks(cls, app: AISApp):
@@ -219,6 +221,8 @@ class ExploreTab:
             if max_length:
                 filtered_groups = filtered_groups[filtered_groups["count"] < max_length]
             selectable_groups = sorted(filtered_groups[group_column_name].unique())
+            if selectable_groups:
+                selectable_groups = [ALL_SEQUENCES_OPTION] + selectable_groups
             return selectable_groups
 
         @app.callback(
@@ -254,11 +258,13 @@ class ExploreTab:
             Input({'component_id': 'select-feature-highlight-dropdown'}, 'value'),
             Input({'component_id': 'explore-radius-factor'}, 'value'),
             Input({'component_id': 'explore-use-absolute-value'}, 'value'),
+            Input({'component_id': 'filter-explore-sequence_id-min-max-length'}, 'value'),
             State({'component_id': 'explore-datasets-dropdown'}, 'value'),
             State('explore-sequence_id', 'data'),
             State({'component_id': 'explore-sequence_id-plot-map'}, 'figure'),
             State('explore-dataset-preview', 'children'),
             State({'component_id': 'explore-sequence_id-column-dropdown'}, 'value'), # select one or many sequences by id
+            State({'component_id': 'select-explore-sequence_id-dropdown'}, 'options'), # available (and narrowed selection)
             State('explore-column-filter-state', 'data'), # Status of of the column filters are stored here
             Input({'component_id': 'explore-sequence-max-count'},'value'),
             Input({'component_id': 'explore-sequence-batch-number'},'value'), # Select the batch number when a lot of sequence should be displayed
@@ -269,11 +275,13 @@ class ExploreTab:
                                features,
                                radius_factor,
                                use_absolute_value,
+                               filter_explore_sequence_id_min_max_length,
                                data_filename,
                                prev_sequence_ids,
                                plot_map_cfg,
                                current_data_preview,
                                sequence_id_column,
+                               sequence_ids_options,
                                column_filter_state,
                                max_sequence_count,
                                batch_number,
@@ -281,81 +289,91 @@ class ExploreTab:
                                plot_height,
                                ):
 
+            if not sequence_ids:
+                return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'})],
+                                hidden=True)], json.dumps(None), current_data_preview, 0
+
+            # per default use
+            adf = AnnotatedDataFrame.from_file(data_filename)
+            groups_df = None
+
             current_sequence_ids = []
-            if sequence_ids:
+            preview_sequence_id = None
+            try:
+                if ALL_SEQUENCES_OPTION in sequence_ids:
+                    sequence_ids_options.remove(ALL_SEQUENCES_OPTION)
+                    sequence_ids = [int(x) for x in sequence_ids_options]
+
+                current_sequence_ids = [int(x) for x in sequence_ids]
+                preview_sequence_id = current_sequence_ids[0]
+            except ValueError:
+                # Looks like the sequence id is a str
+                current_sequence_ids = sequence_ids
+
+            groups_df = adf[adf.dataframe[sequence_id_column].isin(current_sequence_ids)]
+
+            mean_lat = groups_df.mean("Latitude")
+            mean_lon = groups_df.mean("Longitude")
+            var_lat = groups_df.var("Latitude")
+            var_lon = groups_df.var("Longitude")
+            length = groups_df.count()
+
+            data = {"Length": length,
+                    "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
+                    "Lon": f"{mean_lon:.2f} +/- {var_lon:.3f}"
+                    }
+
+            sequence_id_stats_table = dash_table.DataTable(
+                data=[data],
+                columns=[{'id': c, 'name': c} for c in data.keys()],
+                # https://dash.plotly.com/datatable/style
+                style_cell={'textAlign': 'center', 'padding': "5px"},
+                style_header={'backgroundColor': 'lightgray',
+                                'color': 'white',
+                                'fontWeight': 'bold'}
+            )
+
+            # Ensure that the mapbox remains centered where it was before (when only an addition a column)
+            # is being highlighted
+            zoom_factor = None
+            center = None
+            if prev_sequence_ids and prev_sequence_ids != 'null':
+                prev_sequence_ids = json.loads(prev_sequence_ids)
                 try:
-                    current_sequence_ids = [int(x) for x in sequence_ids]
+                    prev_sequence_ids = [int(x) for x in prev_sequence_ids]
                 except ValueError:
-                    # Looks like the sequence id is a str
-                    current_sequence_ids = sequence_ids
+                    # Ids seem to be strings after all
+                    pass
 
-                adf = AnnotatedDataFrame.from_file(data_filename)
-                groups_df = adf[adf.dataframe[sequence_id_column].isin(current_sequence_ids)]
+                if current_sequence_ids == prev_sequence_ids and plot_map_cfg:
+                    zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
+                    center = plot_map_cfg["layout"]["mapbox"]["center"]
 
-                mean_lat = groups_df.mean("Latitude")
-                mean_lon = groups_df.mean("Longitude")
-                var_lat = groups_df.var("Latitude")
-                var_lon = groups_df.var("Longitude")
-                length = groups_df.count()
+            #  Allow stepping through all using a paging-like mechanism
+            all_ids = sorted(groups_df['passage_plan_id'].unique())
+            partition_count = int(len(all_ids)/max_sequence_count)
+            if partition_count >= 2:
+                bounded_ids = np.array_split(all_ids, partition_count)[batch_number]
+                groups_df = groups_df[groups_df['passage_plan_id'].isin(bounded_ids)]
 
-                data = {"Length": length,
-                        "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
-                        "Lon": f"{mean_lon:.2f} +/- {var_lon:.3f}"
-                        }
+            trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
+                                                figure=create_figure_trajectory(groups_df,
+                                                                                densities_by=features,
+                                                                                zoom_factor=zoom_factor,
+                                                                                radius_factor=float(radius_factor/10.0),
+                                                                                center=center,
+                                                                                use_absolute_value=use_absolute_value,
+                                                                                width=plot_width,
+                                                                                height=plot_height,
+                                                                                ),
+                                                style={
+                                                    "width": "100%",
+                                                    "height": "100%"
+                                                })
 
-                sequence_id_stats_table = dash_table.DataTable(
-                    data=[data],
-                    columns=[{'id': c, 'name': c} for c in data.keys()],
-                    # https://dash.plotly.com/datatable/style
-                    style_cell={'textAlign': 'center', 'padding': "5px"},
-                    style_header={'backgroundColor': 'lightgray',
-                                  'color': 'white',
-                                  'fontWeight': 'bold'}
-                )
-
-                # Ensure that the mapbox remains centered where it was before (when only an addition a column)
-                # is being highlighted
-                zoom_factor = None
-                center = None
-                if prev_sequence_ids and prev_sequence_ids != 'null':
-                    prev_sequence_ids = json.loads(prev_sequence_ids)
-                    try:
-                        prev_sequence_ids = [int(x) for x in prev_sequence_ids]
-                    except ValueError:
-                        # Ids seem to be strings after all
-                        pass
-
-                    if current_sequence_ids == prev_sequence_ids and plot_map_cfg:
-                        zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
-                        center = plot_map_cfg["layout"]["mapbox"]["center"]
-
-                #  Allow stepping through all using a paging-like mechanism
-                all_ids = sorted(groups_df['passage_plan_id'].unique())
-                partition_count = int(len(all_ids)/max_sequence_count)
-                if partition_count >= 2:
-                    bounded_ids = np.array_split(all_ids, partition_count)[batch_number]
-                    groups_df = groups_df[groups_df['passage_plan_id'].isin(bounded_ids)]
-
-                trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
-                                                 figure=create_figure_trajectory(groups_df,
-                                                                                 densities_by=features,
-                                                                                 zoom_factor=zoom_factor,
-                                                                                 radius_factor=float(radius_factor/10.0),
-                                                                                 center=center,
-                                                                                 use_absolute_value=use_absolute_value,
-                                                                                 width=plot_width,
-                                                                                 height=plot_height,
-                                                                                 ),
-                                                 style={
-                                                     "width": "100%",
-                                                     "height": "100%"
-                                                 })
-
-                return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_ids), create_figure_data_preview_table(data_df=adf.dataframe,
-                                                                                                                             sequence_id_column=sequence_id_column,
-                                                                                                                             sequence_id=sequence_ids[0]), max(0, partition_count-1)
-            return [html.Div(children=[dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'})],
-                             hidden=True)], json.dumps(None), current_data_preview, 0
+            return [sequence_id_stats_table, trajectory_plot], json.dumps(sequence_ids), create_figure_data_preview_table(data_df=adf.dataframe,
+                                                                                                                            sequence_id_column=sequence_id_column,
+                                                                                                                            sequence_id=preview_sequence_id), max(0, partition_count-1)
 
         @app.callback(
                 Input({'component_id': 'explore-sequence-batch-number'}, 'max'),
@@ -373,7 +391,11 @@ class ExploreTab:
         def update_data(explore_data_filename,
                         dash_logger: DashLogger):
             """
-            Set the current data that shall be used for prediction
+            Set the current data *.hdf5 file that shall be used for analysis.
+
+            The file has to be generated / prepared with 'damast' so that the
+            data specification is contained in the hdf5 file.
+
             :return:
             """
             filename = explore_data_filename
