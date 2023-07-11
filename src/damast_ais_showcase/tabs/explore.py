@@ -358,6 +358,13 @@ class ExploreTab:
                              hidden=True)], json.dumps(None), current_data_preview, 0
 
         @app.callback(
+                Input({'component_id': 'explore-sequence-batch-number'}, 'max'),
+                Output({'component_id': 'explore-sequence-max-batch-number'}, 'children')
+        )
+        def display_max_batch_number(max_batch_number):
+            return html.H4(f" / {max_batch_number}")
+
+        @app.callback(
             Output('explore-sequence_id-column', 'children'),
             Input({'component_id': 'explore-datasets-dropdown'}, 'value'),
             prevent_initial_callbacks=True,
@@ -668,6 +675,12 @@ class ExploreTab:
                                                                     'display': 'inline-block',
                                                                     'verticalAlign': 'middle',
                                                                     'padding': '2em',
+                                                                }
+                                                           ),
+                                                           html.Div(id={'component_id': 'explore-sequence-max-batch-number'},
+                                                                style={
+                                                                    'display': 'inline-block',
+                                                                    'verticalAlign': 'left',
                                                                 }
                                                            ),
                                                        ],
