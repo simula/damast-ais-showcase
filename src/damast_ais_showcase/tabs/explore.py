@@ -184,6 +184,10 @@ class ExploreTab:
                     min_value = filter_status['value'][0]
                     max_value = filter_status['value'][1]
 
+                    # FIXME: handle issue on Mac OS
+                    if min_value == "None" or max_value == "None":
+                        continue
+
                     dtype = adf[:5].to_pandas_df().dtypes[column_name]
                     if is_datetime64_ns_dtype(dtype):
                         min_value = np.datetime64(min_value[:10])
