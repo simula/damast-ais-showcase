@@ -35,7 +35,7 @@ This project is licensed under the [BSD-3-Clause License](LICENSE).
 
 Copyright (c) 2023-2025 [Simula Research Laboratory, Oslo, Norway](https://www.simula.no/research/research-departments)
 
-## Acknowledgments
+## Acknowledgements
 
 This library has been started based on the experiences in the [T-SAR project](https://www.simula.no/research/projects/t-sar).
 The development of this showcase is part of the EU-project [AI4COPSEC](https://ai4copsec.eu) which receives funding from the Horizon Europe framework programme under Grant Agreement N. 101190021.
