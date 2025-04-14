@@ -39,6 +39,7 @@ class VisualizationType(str, Enum):
     Metadata = "Metadata"
 
 ALL_SEQUENCES_OPTION = "all"
+SUPPORTED_FILE_FORMATS: list[str] = [".parquet", ".pq", ".nc", ".netcdf", ".nc4", ".netcdf4", ".h5", ".hdf", ".hdf5"]
 
 def pandas_slice(adf: AnnotatedDataFrame) -> pd.DataFrame:
    return adf.slice(offset=0, length=5).collect().to_pandas()
@@ -69,6 +70,7 @@ def get_lat_lon_col(adf: AnnotatedDataFrame) -> dict[str, str]:
     return mapping
 
 class ExploreTab:
+
     @classmethod
     def register_callbacks(cls, app: AISApp):
 
@@ -83,7 +85,7 @@ class ExploreTab:
             id='explore-dataset-upload'
         )
         def upload(status: du.UploadStatus):
-            return { str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file()}
+            return { str(x): x.name for x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file() and x.suffix in SUPPORTED_FILE_FORMATS}
 
         @app.callback(
                 Input({'component_id' : 'explore-sequence_id-column-dropdown'}, 'value')
@@ -123,7 +125,7 @@ class ExploreTab:
             if not state_data_filename:
                 return [], True
 
-            adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
+            adf = AnnotatedDataFrame.from_file(filename=state_data_filename, metadata_required=False)
 
             # If a group id has been selected, then limit the visualisation to this group id
             if state_sequence_id_column and state_sequence_id and state_sequence_id != 'null':
@@ -190,7 +192,7 @@ class ExploreTab:
                 return [], []
 
 
-            adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
+            adf = AnnotatedDataFrame.from_file(filename=state_data_filename, metadata_required=False)
             analyse_df = adf
             if state_data_columns and state_data_columns != 'null':
                 analyse_df = adf[state_data_columns]
@@ -289,7 +291,7 @@ class ExploreTab:
                 return []
 
             min_length, max_length = min_max_length
-            adf = AnnotatedDataFrame.from_file(data_filename)
+            adf = AnnotatedDataFrame.from_file(data_filename, metadata_required=False)
 
             logger.info(f"Filter for {sequence_id_column=} {min_length=} {max_length=}")
             return get_selectables(adf=adf,
@@ -346,7 +348,7 @@ class ExploreTab:
                                 hidden=True)], json.dumps(None), current_data_preview, 0
 
             # per default use
-            adf = AnnotatedDataFrame.from_file(data_filename)
+            adf = AnnotatedDataFrame.from_file(data_filename, metadata_required=False)
             groups_df = None
 
             current_sequence_ids = []
@@ -459,7 +461,7 @@ class ExploreTab:
             filename = explore_data_filename
             options = {}
             if filename and filename != '' and isinstance(filename, str):
-                adf = AnnotatedDataFrame.from_file(filename=filename)
+                adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
                 for c in adf.column_names:
                     label = c
                     try:
@@ -467,7 +469,8 @@ class ExploreTab:
                         if metadata.description != '':
                             label += f" - {metadata.description}"
                         options[c] = label
-                    except KeyError:
+                    except KeyError as e:
+                        logger.info(f"update_data: no key {c} found in metadata")
                         pass
 
             select_sequence_column_dropdown = dcc.Dropdown(
@@ -493,7 +496,7 @@ class ExploreTab:
             if not filename or filename == '' or not isinstance(filename, str):
                 return []
 
-            adf = AnnotatedDataFrame.from_file(filename=filename)
+            adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
             df = pandas_slice(adf)
 
             filter_columns_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c]) or is_datetime64_ns_dtype(df.dtypes[c])]
@@ -557,7 +560,7 @@ class ExploreTab:
             if not value or not filename or filename == '' or not isinstance(filename, str):
                 return []
 
-            adf = AnnotatedDataFrame.from_file(filename=filename)
+            adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
 
             filter_id = component_id['filter_id']
             dtype = pandas_slice(adf).dtypes[value]
@@ -692,7 +695,7 @@ class ExploreTab:
             if not filename or filename == '' or not isinstance(filename, str) or explore_sequence_id_column is None:
                 return state_data_preview, state_prediction_sequence_id_selection, False, True
 
-            adf = AnnotatedDataFrame.from_file(filename=filename)
+            adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
             data_preview_table = create_figure_data_preview_table(adf.dataframe)
 
             select_sequence_id_dropdown = dcc.Dropdown(
@@ -876,7 +879,7 @@ class ExploreTab:
         datasets_dropdown = html.Div(
             children=[html.H3("Available datasets"),
             dcc.Dropdown(id={'component_id': "explore-datasets-dropdown"},
-                         options={ str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file()},
+                         options={ str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file() and x.suffix in SUPPORTED_FILE_FORMATS},
                          placeholder="Select a dataset",
                          multi=False)],
             style={
