@@ -409,9 +409,10 @@ class ExploreTab:
 
             #  Allow stepping through all using a paging-like mechanism
             all_ids = groups_df.select(sequence_id_column).unique().sort(by=sequence_id_column).collect()
+
             partition_count = int(len(all_ids)/max_sequence_count)
             if partition_count >= 2:
-                bounded_ids = np.array_split(all_ids, partition_count)[batch_number]
+                bounded_ids = np.array_split(all_ids, partition_count)[batch_number][:,0]
                 groups_df = groups_df.filter(pl.col(sequence_id_column).is_in(bounded_ids))
 
             trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
