@@ -88,12 +88,6 @@ class ExploreTab:
             return { str(x): x.name for x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file() and x.suffix in SUPPORTED_FILE_FORMATS}
 
         @app.callback(
-                Input({'component_id' : 'explore-sequence_id-column-dropdown'}, 'value')
-        )
-        def update_group_id(value):
-            logger.info(f"Squence column dropdown is: {value}")
-
-        @app.callback(
             Output('explore-dataset', 'children'),
             Output('explore-column-filter-state', 'clear_data'),
             Input({'component_id': 'explore-data-visualization-dropdown'}, 'value'),
