@@ -391,7 +391,7 @@ class ExploreTab:
                                 'fontWeight': 'bold'}
             )
 
-            # Ensure that the mapbox remains centered where it was before (when only an addition a column)
+            # Ensure that the map remains centered where it was before (when only an addition a column)
             # is being highlighted
             zoom_factor = None
             center = None
@@ -404,8 +404,8 @@ class ExploreTab:
                     pass
 
                 if current_sequence_ids == prev_sequence_ids and plot_map_cfg:
-                    zoom_factor = plot_map_cfg["layout"]["mapbox"]["zoom"]
-                    center = plot_map_cfg["layout"]["mapbox"]["center"]
+                    zoom_factor = plot_map_cfg["layout"]["map"]["zoom"]
+                    center = plot_map_cfg["layout"]["map"]["center"]
 
             #  Allow stepping through all using a paging-like mechanism
             all_ids = groups_df.select(sequence_id_column).unique().sort(by=sequence_id_column).collect()

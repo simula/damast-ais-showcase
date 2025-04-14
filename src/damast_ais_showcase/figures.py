@@ -194,7 +194,7 @@ def create_figure_trajectory(data_df: AnnotatedDataFrame,
         if column not in [sequence_id_column] and not column.startswith("__"):
             input_data[column] = data_df[column]
 
-    fig = px.line_mapbox(input_data,
+    fig = px.line_map(input_data,
                          lat=lat, lon=lon,
                          color="sequence_id",
                          category_orders={'sequence_id': sorted_ids},
@@ -202,7 +202,7 @@ def create_figure_trajectory(data_df: AnnotatedDataFrame,
 
     # Allow to visualize a projection / reference line for the original trajectory
     if len(sorted_ids) == 1 and ref_lat in input_data and ref_lon in input_data:
-        fig_pp = px.line_mapbox(input_data,
+        fig_pp = px.line_map(input_data,
                             lat=ref_lat, lon=ref_lon,
                             color="sequence_id",
                             category_orders={'sequence_id': sorted_ids},
@@ -250,7 +250,7 @@ def create_figure_trajectory(data_df: AnnotatedDataFrame,
                     radius.append(value)
 
             hover_data = {k: True for k, _ in density_input_data.items()}
-            fig_feature = px.density_mapbox(density_input_data,
+            fig_feature = px.density_map(density_input_data,
                                     lat=lat,
                                     lon=lon,
                                     hover_data=hover_data,
@@ -283,14 +283,14 @@ def create_figure_trajectory(data_df: AnnotatedDataFrame,
 
     fig.update_layout(height=height,
                       width=width,
-                      mapbox_style="open-street-map",
-                      mapbox_zoom=zoom_factor)
+                      map_style="open-street-map",
+                      map_zoom=zoom_factor)
 
     if center:
-        fig.update_layout(mapbox_center=center)
+        fig.update_layout(map_center=center)
     else:
         # If not center is given, then use the known mean values of the current data
-        fig.update_layout(mapbox_center={ 'lat': lat_mean, 'lon': lon_mean})
+        fig.update_layout(map_center={ 'lat': lat_mean, 'lon': lon_mean})
 
     return fig
 
