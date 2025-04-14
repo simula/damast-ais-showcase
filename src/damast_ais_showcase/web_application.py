@@ -17,7 +17,7 @@ import dash_uploader as du
 # https://www.dash-extensions.com/transforms/log_transform
 import dash_mantine_components as dmc
 import diskcache
-import vaex
+from damast.core.dataframe import AnnotatedDataFrame
 from damast.ml.scheduler import JobScheduler
 from dash import DiskcacheManager, dcc, html
 from dash_extensions.enrich import DashLogger, DashProxy, LogTransform
@@ -32,17 +32,6 @@ background_callback_manager = DiskcacheManager(cache)
 
 DATA_UPLOAD_PATH = Path(tempfile.gettempdir()) / "damast-ais-showcase"
 
-
-def sort_by(df: vaex.DataFrame, key: str) -> vaex.DataFrame:
-    """Sort input dataframe by entries in given column"""
-    return df.sort(df[key])
-
-def transform_value(value):
-    return 10 ** value
-
-def count_number_of_messages(data: vaex.DataFrame) -> vaex.DataFrame:
-    """Given a set of AIS messages, accumulate number of messages per passage_plan_id identifier"""
-    return data.groupby("passage_plan_id", agg="count")
 
 class WebApplication:
     """
@@ -88,7 +77,9 @@ class WebApplication:
             children=[dash.html.H1(children=header)]))
 
     def run_server(self, debug: bool = True):
-        self._app.layout = dash.html.Div(self._layout)
+        self._app.layout = dmc.MantineProvider(
+            dash.html.Div(self._layout)
+        )
         self._app.run(debug=debug, host=self._server, port=self._port)
 
     def open_browser(self):

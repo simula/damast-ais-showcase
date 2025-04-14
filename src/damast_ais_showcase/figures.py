@@ -2,7 +2,7 @@ import plotly.express as px
 import plotly.graph_objs as go
 from dash import dash_table, html, dcc
 import numpy as np
-import vaex
+import polars as pl
 from typing import Optional, List, Any, Dict
 import pandas as pd
 
@@ -52,7 +52,7 @@ def create_figure_histogram(x, counts, title=None, xlabel=None, ylabel=None):
 
 
 def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
-    data_df = adf._dataframe.copy()
+    data_df = adf._dataframe
 
     histograms = []
     col = data_df[column_name]
@@ -82,15 +82,14 @@ def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure
 
 
 def create_div_statistic(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
-    data_df = adf._dataframe.copy()
+    data_df = adf._dataframe
     statistics = []
-    if data_df[column_name].dtype == np.float16:
-        data_df[column_name] = data_df[column_name].astype('float32')
-    min_value = data_df.min(column_name)
-    max_value = data_df.max(column_name)
-    median_approx = data_df.median_approx(column_name)
-    mean = data_df.mean(column_name)
-    variance = data_df.var(column_name)
+
+    min_value = data_df.select(pl.col(column_name)).min().collect()[0,0]
+    max_value = data_df.select(pl.col(column_name)).max().collect()[0,0]
+    median_approx = data_df.select(pl.col(column_name)).median().collect()[0,0]
+    mean = data_df.select(pl.col(column_name)).mean().collect()[0,0]
+    variance = data_df.select(pl.col(column_name)).var().collect()[0,0]
 
     data = {
         "min": min_value,
@@ -142,7 +141,7 @@ def create_div_metadata(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
     return metadata
 
 
-def create_figure_trajectory(data_df: vaex.DataFrame,
+def create_figure_trajectory(data_df: AnnotatedDataFrame,
                              zoom_factor: Optional[float] = None,
                              center: Optional[Dict[str, float]] = None,
                              radius_factor: float = 10.0,
@@ -151,6 +150,7 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
                              sequence_id_column = "passage_plan_id",
                              width=2000,
                              height=2000,
+                             lat_lon_cols = ["Latitude", "Longitude"],
                              sequence_reference_cols={'Latitude': 'pp_proj_lat', 'Longitude': 'pp_proj_lon'},
                              ) -> go.Figure:
     """
@@ -162,37 +162,40 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
             reference for the actual sequence latitude / longitude columns which can
             be displayed as a reference (ground-truth) trajectory
     """
-    sorted_ids = sorted(data_df[sequence_id_column].unique())
+    sorted_ids = data_df.select(pl.col(sequence_id_column)).unique().sort(by=sequence_id_column).collect()[:,0].to_list()
 
+    lat, lon = lat_lon_cols
     ref_lat = sequence_reference_cols["Latitude"]
     ref_lon = sequence_reference_cols["Longitude"]
 
     # Wrap the data so that transitions over the antimeridian do not lead to
     # map artifacts
-    data_df_pandas = data_df.to_pandas_df()
-    lat_crossings = pd.DataFrame(data_df_pandas.groupby(sequence_id_column)["Latitude"].apply(lambda x: x.min() < -89 or x.max() > 89).reset_index())
-    lon_crossings = pd.DataFrame(data_df_pandas.groupby(sequence_id_column)["Longitude"].apply(lambda x: x.min() < -179 or x.max() > 179).reset_index())
+    data_df_pandas = data_df.collect().to_pandas()
+    data_df = data_df.collect().to_pandas()
+    lat_crossings = pd.DataFrame(data_df_pandas.groupby(sequence_id_column)[lat].apply(lambda x: x.min() < -89 or x.max() > 89).reset_index())
+    lon_crossings = pd.DataFrame(data_df_pandas.groupby(sequence_id_column)[lon].apply(lambda x: x.min() < -179 or x.max() > 179).reset_index())
 
-    lat_crossings = lat_crossings[lat_crossings["Latitude"]][sequence_id_column].to_numpy()
-    data_df["Latitude"] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Latitude"]])
-    if ref_lat in data_df.column_names:
-        data_df[ref_lat] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lat]])
+    lat_crossings = lat_crossings[lat_crossings[lat]][sequence_id_column].to_numpy()
+    data_df[lat] = data_df.apply(lambda x: x[lat] + 180 if x[sequence_id_column] in lat_crossings and x[lat] < 0 else x[lat], axis=1)
+    #if ref_lat in data_df.column_names:
+    #    data_df[ref_lat] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lat]])
 
-    lon_crossings = lon_crossings[lon_crossings["Longitude"]][sequence_id_column].to_numpy()
-    data_df["Longitude"] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df["Longitude"]])
-    if ref_lon in data_df.column_names:
-        data_df[ref_lon] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lon]])
+    lon_crossings = lon_crossings[lon_crossings[lon]][sequence_id_column].to_numpy()
+    data_df[lon] = data_df.apply(lambda x: x[lon] + 360 if x[sequence_id_column] in lon_crossings and x[lon] < 0 else x[lon], axis=1)
+
+    #if ref_lon in data_df.column_names:
+    #    data_df[ref_lon] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lon]])
 
     input_data = {
-        "sequence_id": data_df[sequence_id_column].evaluate(),
+        "sequence_id": data_df[sequence_id_column]
     }
     # Add all information to the tooltip of the main line plot
-    for column in data_df.column_names:
+    for column in data_df.columns:
         if column not in [sequence_id_column] and not column.startswith("__"):
-            input_data[column] = data_df[column].evaluate()
+            input_data[column] = data_df[column]
 
     fig = px.line_mapbox(input_data,
-                         lat="Latitude", lon="Longitude",
+                         lat=lat, lon=lon,
                          color="sequence_id",
                          category_orders={'sequence_id': sorted_ids},
                          )
@@ -226,9 +229,10 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
             if use_absolute_value:
                 density_input_df[density_by] = density_input_df[density_by].abs()
 
-            scaler = vaex.ml.StandardScaler(features=[density_by])
+            # 2maz
+            #scaler = vaex.ml.StandardScaler(features=[density_by])
             # this will create a column 'standard_scaled_<feature-name>'
-            density_input_df = scaler.fit_transform(density_input_df)
+            #density_input_df = scaler.fit_transform(density_input_df)
             normalized_column = f"standard_scaled_{density_by}"
 
             density_input_data[density_by] = density_input_df[density_by].evaluate()
@@ -247,8 +251,8 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
 
             hover_data = {k: True for k, _ in density_input_data.items()}
             fig_feature = px.density_mapbox(density_input_data,
-                                    lat='Latitude',
-                                    lon='Longitude',
+                                    lat=lat,
+                                    lon=lon,
                                     hover_data=hover_data,
                                     color_continuous_scale="YlOrRd",
                                     #range_color=[0,10],
@@ -259,14 +263,14 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
 
     fig.update_coloraxes(showscale=False)
 
-    lat_mean = np.mean(input_data["Latitude"])
-    lon_mean = np.mean(input_data["Longitude"])
+    lat_mean = np.mean(input_data[lat])
+    lon_mean = np.mean(input_data[lon])
 
-    lon_min = np.min(input_data["Longitude"])
-    lon_max = np.max(input_data["Longitude"])
+    lon_min = np.min(input_data[lon])
+    lon_max = np.max(input_data[lon])
 
-    lat_min = np.min(input_data["Longitude"])
-    lat_max = np.max(input_data["Longitude"])
+    lat_min = np.min(input_data[lat])
+    lat_max = np.max(input_data[lat])
 
     if not zoom_factor:
         # Upon rendering a new trajectory (set)
@@ -290,7 +294,7 @@ def create_figure_trajectory(data_df: vaex.DataFrame,
 
     return fig
 
-def create_figure_feature_correlation_heatmap(data_df: vaex.DataFrame) -> go.Figure:
+def create_figure_feature_correlation_heatmap(data_df: AnnotatedDataFrame) -> go.Figure:
     """
     Create a heatmap image with the correlations of all dataframe columns
 
@@ -300,13 +304,13 @@ def create_figure_feature_correlation_heatmap(data_df: vaex.DataFrame) -> go.Fig
     Returns:
         go.Figure: _description_
     """
-    df_correlations = data_df.to_pandas_df().corr(numeric_only=True)
+    df_correlations = data_df.collect().to_pandas().corr(numeric_only=True)
     return px.imshow(df_correlations,
                      text_auto='.2f',
                      height=1000,
                      width=1000)
 
-def create_figure_data_preview_table(data_df: vaex.DataFrame,
+def create_figure_data_preview_table(data_df: AnnotatedDataFrame,
                                      sequence_id_column: Optional[str] = None,
                                      sequence_id: Optional[int] = None,
                                      upper_bound: int = 500,
@@ -325,9 +329,9 @@ def create_figure_data_preview_table(data_df: vaex.DataFrame,
         List[Any]: List of html object that shall be rendered
     """
     if sequence_id_column and sequence_id:
-        data_df = data_df[data_df[sequence_id_column] == sequence_id]
+        data_df = data_df.filter(pl.col(sequence_id_column) == sequence_id)
 
-    df = data_df[:upper_bound].to_pandas_df()
+    df = data_df.slice(offset=0, length=upper_bound).collect().to_pandas()
     return [html.H3("Data Preview"),
             dash_table.DataTable(
             data=df.to_dict('records'),

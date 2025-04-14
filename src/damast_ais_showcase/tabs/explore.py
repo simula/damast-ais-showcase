@@ -1,4 +1,5 @@
 import uuid
+import logging
 import dash
 import dash_daq as daq
 from dash import dash_table, State, dcc, Output, Input, html, ALL, MATCH, Patch
@@ -10,8 +11,10 @@ from enum import Enum
 import json
 from pathlib import Path
 import numpy as np
+import polars as pl
 from typing import List, Any
 
+import pandas as pd
 from pandas.api.types import is_numeric_dtype, is_datetime64_ns_dtype
 from logging import WARNING
 
@@ -27,12 +30,43 @@ from ..figures import (
 
 from ..web_application import AISApp
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 class VisualizationType(str, Enum):
     Histogram = "Histogram"
     Statistics = "Statistics"
     Metadata = "Metadata"
 
 ALL_SEQUENCES_OPTION = "all"
+
+def pandas_slice(adf: AnnotatedDataFrame) -> pd.DataFrame:
+   return adf.slice(offset=0, length=5).collect().to_pandas()
+
+
+def get_lat_lon_col(adf: AnnotatedDataFrame) -> dict[str, str]:
+    latitude_candidates = []
+    longitude_candidates = []
+    for col in adf.column_names:
+        if col.lower().startswith("lon"):
+            longitude_candidates.append(col)
+
+        if col.lower().startswith("lat"):
+            latitude_candidates.append(col)
+
+    mapping = {}
+    mapping['Latitude']  = latitude_candidates[0]
+    mapping['Longitude']  = longitude_candidates[0]
+
+    if len(latitude_candidates) != 1:
+        logger.warn(f"Multiple candidates for latitude column: {latitude_candidates=}, "
+            f"using {latitude_candidates[0]}")
+
+    if len(longitude_candidates) != 1:
+        logger.warn(f"Multiple candidates for longitude column: {longitude_candidates=}, "
+            f"using {longitude_candidates[0]}")
+
+    return mapping
 
 class ExploreTab:
     @classmethod
@@ -50,6 +84,12 @@ class ExploreTab:
         )
         def upload(status: du.UploadStatus):
             return { str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file()}
+
+        @app.callback(
+                Input({'component_id' : 'explore-sequence_id-column-dropdown'}, 'value')
+        )
+        def update_group_id(value):
+            logger.info(f"Squence column dropdown is: {value}")
 
         @app.callback(
             Output('explore-dataset', 'children'),
@@ -85,15 +125,16 @@ class ExploreTab:
 
             adf = AnnotatedDataFrame.from_file(filename=state_data_filename)
 
-            # If a passage plan id has been selected, then limit the visualisation to this passage plan id
-            if state_sequence_id and state_sequence_id != 'null':
+            # If a group id has been selected, then limit the visualisation to this group id
+            if state_sequence_id_column and state_sequence_id and state_sequence_id != 'null':
+                logger.info(f"Sequence {state_sequence_id=} of {state_sequence_id_column=} selected")
                 try:
                     current_sequence_id = int(state_sequence_id)
                 except Exception:
                     # Looks like this is a string based id
                     current_sequence_id = state_sequence_id
 
-                adf._dataframe = adf.dataframe[adf.dataframe[state_sequence_id_column] == current_sequence_id]
+                adf._dataframe = adf.dataframe.filter(pl.col(state_sequence_id_column) == current_sequence_id)
 
             if dropdown_data_visualization:
                 explore_dataset_children = []
@@ -188,14 +229,14 @@ class ExploreTab:
                     if min_value == "None" or max_value == "None":
                         continue
 
-                    dtype = adf[:5].to_pandas_df().dtypes[column_name]
+                    dtype = pandas_slice(adf).dtypes[column_name]
                     if is_datetime64_ns_dtype(dtype):
                         min_value = np.datetime64(min_value[:10])
                         max_value = np.datetime64(max_value[:10])
 
                     adf._dataframe = (adf.dataframe
-                                        .filter(adf.dataframe[column_name] >= min_value, mode='and')
-                                        .filter(adf.dataframe[column_name] <= max_value, mode='and')
+                                        .filter(pl.col(column_name) >= min_value)
+                                        .filter(pl.col(column_name) <= max_value)
                                     )
 
         def get_selectables(adf: AnnotatedDataFrame,
@@ -220,11 +261,17 @@ class ExploreTab:
             """
             apply_column_filter(adf=adf, column_filter_state=column_filter_state)
 
-            entries_per_group = adf.groupby(group_column_name, agg="count")
-            filtered_groups = entries_per_group[entries_per_group["count"] > min_length]
+            if group_column_name is None:
+                raise ValueError("Group identifier cannot be 'None'")
+
+            logger.info(f"Group column filter: {group_column_name=}")
+
+            entries_per_group = adf.group_by(group_column_name).agg(pl.len().alias("count"))
+            filtered_groups = entries_per_group.filter(pl.col("count") > min_length)
             if max_length:
-                filtered_groups = filtered_groups[filtered_groups["count"] < max_length]
-            selectable_groups = sorted(filtered_groups[group_column_name].unique())
+                filtered_groups = filtered_groups.filter(pl.col("count") < max_length)
+            selectable_groups = filtered_groups.select(pl.col(group_column_name)).unique().sort(by=group_column_name).collect()[:,0].to_list()
+
             if selectable_groups:
                 selectable_groups = [ALL_SEQUENCES_OPTION] + selectable_groups
             return selectable_groups
@@ -244,6 +291,7 @@ class ExploreTab:
             min_length, max_length = min_max_length
             adf = AnnotatedDataFrame.from_file(data_filename)
 
+            logger.info(f"Filter for {sequence_id_column=} {min_length=} {max_length=}")
             return get_selectables(adf=adf,
                                    group_column_name=sequence_id_column,
                                    column_filter_state=column_filter_state,
@@ -314,13 +362,17 @@ class ExploreTab:
                 # Looks like the sequence id is a str
                 current_sequence_ids = sequence_ids
 
-            groups_df = adf[adf.dataframe[sequence_id_column].isin(current_sequence_ids)]
+            groups_df = adf.filter(pl.col(sequence_id_column).is_in(current_sequence_ids))
 
-            mean_lat = groups_df.mean("Latitude")
-            mean_lon = groups_df.mean("Longitude")
-            var_lat = groups_df.var("Latitude")
-            var_lon = groups_df.var("Longitude")
-            length = groups_df.count()
+            col_mapping = get_lat_lon_col(adf)
+            lat_col = pl.col(col_mapping["Latitude"])
+            lon_col = pl.col(col_mapping["Longitude"])
+
+            mean_lat = groups_df.select(lat_col).mean().collect()[0,0]
+            mean_lon = groups_df.select(lon_col).mean().collect()[0,0]
+            var_lat = groups_df.select(lat_col).var().collect()[0,0]
+            var_lon = groups_df.select(lon_col).var().collect()[0,0]
+            length = groups_df.count().collect()[0,0]
 
             data = {"Length": length,
                     "Lat": f"{mean_lat:.2f} +/- {var_lat:.3f}",
@@ -354,11 +406,11 @@ class ExploreTab:
                     center = plot_map_cfg["layout"]["mapbox"]["center"]
 
             #  Allow stepping through all using a paging-like mechanism
-            all_ids = sorted(groups_df['passage_plan_id'].unique())
+            all_ids = groups_df.select(sequence_id_column).unique().sort(by=sequence_id_column).collect()
             partition_count = int(len(all_ids)/max_sequence_count)
             if partition_count >= 2:
                 bounded_ids = np.array_split(all_ids, partition_count)[batch_number]
-                groups_df = groups_df[groups_df['passage_plan_id'].isin(bounded_ids)]
+                groups_df = groups_df.filter(pl.col(sequence_id_column).is_in(bounded_ids))
 
             trajectory_plot = dash.dcc.Graph(id={'component_id': 'explore-sequence_id-plot-map'},
                                                 figure=create_figure_trajectory(groups_df,
@@ -367,6 +419,8 @@ class ExploreTab:
                                                                                 radius_factor=float(radius_factor/10.0),
                                                                                 center=center,
                                                                                 use_absolute_value=use_absolute_value,
+                                                                                sequence_id_column=sequence_id_column,
+                                                                                lat_lon_cols=col_mapping.values(),
                                                                                 width=plot_width,
                                                                                 height=plot_height,
                                                                                 ),
@@ -440,7 +494,7 @@ class ExploreTab:
                 return []
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
-            df = adf[:5].to_pandas_df()
+            df = pandas_slice(adf)
 
             filter_columns_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c]) or is_datetime64_ns_dtype(df.dtypes[c])]
 
@@ -506,11 +560,11 @@ class ExploreTab:
             adf = AnnotatedDataFrame.from_file(filename=filename)
 
             filter_id = component_id['filter_id']
-            dtype = adf[:5].to_pandas_df().dtypes[value]
+            dtype = pandas_slice(adf).dtypes[value]
             if is_numeric_dtype(dtype):
                 # Ensure that a value range exists
-                min_value = min(adf[value].min(), 0)
-                max_value = max(adf[value].max(), 1)
+                min_value = min(adf[value].min().collect()[0,0], 0)
+                max_value = max(adf[value].max().collect()[0,0], 1)
                 filter_slider = dash.dcc.RangeSlider(
                     id={'component_id': 'explore-column-filter-range', 'filter_id': filter_id },
                     min=int(min_value), max=int(max_value)+1,
@@ -520,8 +574,8 @@ class ExploreTab:
                 )
                 return [filter_slider]
             elif is_datetime64_ns_dtype(dtype):
-                min_value = adf[value].min()
-                max_value = adf[value].max()
+                min_value = adf[value].min().collect()[0,0]
+                max_value = adf[value].max().collect()[0,0]
 
                 date_picker = dcc.DatePickerRange(
                     id={'component_id': 'explore-column-filter-range', 'filter_id': filter_id },
@@ -630,8 +684,12 @@ class ExploreTab:
             :param state_data_preview:
             :return:
             """
+            logger.info(f"{explore_sequence_id_column=}")
+            if not explore_sequence_id_column:
+                return [], [], None, None
+
             filename = explore_data_filename
-            if not filename or filename == '' or not isinstance(filename, str):
+            if not filename or filename == '' or not isinstance(filename, str) or explore_sequence_id_column is None:
                 return state_data_preview, state_prediction_sequence_id_selection, False, True
 
             adf = AnnotatedDataFrame.from_file(filename=filename)
@@ -643,7 +701,7 @@ class ExploreTab:
                 multi=True,
             )
 
-            df = adf[:5].to_pandas_df()
+            df = pandas_slice(adf)
             feature_highlight_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c])]
             feature_highlight_options.append({'label': 'no highlighting', 'value': ''})
             # Allow to select multiple features to highlight
@@ -741,9 +799,14 @@ class ExploreTab:
                                                 )
 
             min_messages = 0
-            grouped = adf.groupby(explore_sequence_id_column, agg={'sequence_length': 'count'})
+            grouped = adf.group_by(explore_sequence_id_column).agg(pl.len().alias("sequence_length")).collect()
             # Ensure that a minimal range exists
-            max_messages = max(max(grouped.sequence_length.values),1)
+            # Ensure min 1
+            max_messages = 0
+            if not grouped.is_empty():
+                max_messages = grouped.select(pl.col("sequence_length")).max().item(0,0)
+
+            max_messages = max(max_messages,1)
             # markers = np.linspace(min_messages, max_messages, 10, endpoint=True)
             filter_sequence_id_slider = dash.dcc.RangeSlider(id={'component_id': 'filter-explore-sequence_id-min-max-length'},
                                                  min=min_messages, max=max_messages,
@@ -868,7 +931,7 @@ class ExploreTab:
                                         max_file_size=10000, # 10 000 Mb,
                                         cancel_button=True,
                                         pause_button=True,
-                                        filetypes=['h5', 'hdf5'],
+                                        filetypes=['parquet', 'netcdf', 'h5', 'hdf5'],
                                         upload_id='datasets',
                                         max_files=1,
                                     ),
@@ -889,7 +952,7 @@ class ExploreTab:
                            datasets_dropdown,
                            html.Div(id='explore-sequence_id-column',
                                     children=[
-                                        dcc.Dropdown(id={"component_id": "explore-sequence_id-column-dropdown"})
+                                        dcc.Dropdown(id={"component_id": "explore-sequence_id-column-dropdown"}, options=["test"], multi=True)
                                     ]
                            ),
                            html.Div(id='explore-sequence_id-selection'),

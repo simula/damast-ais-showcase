@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Union
 
 import damast
-import vaex
 from damast.core.dataframe import AnnotatedDataFrame
 from damast.core.dataprocessing import PipelineElement
 from damast.core.datarange import CyclicMinMax
 from damast.core.units import units
+from damast.core.transformations import CycleTransformer
 
 from damast_ais_showcase.web_application import AISApp
 
@@ -43,11 +43,8 @@ class LatLonFilter(PipelineElement):
         "longitude": {"unit": units.deg, "value_range": CyclicMinMax(-180.0, 180.0)}
     })
     def transform(self, df: AnnotatedDataFrame) -> AnnotatedDataFrame:
-        df["latitude"] = df["lat"]
-        df._dataframe = df.filter(df.latitude >= -90.0).filter(df.latitude <= 90.0)
-
-        df["longitude"] = df["lon"]
-        df._dataframe = df.filter(df.longitude >= -180.0).filter(df.longitude <= 180.0)
+        df._dataframe = df.with_columns(pl.col("lat").alias("latitude"), pl.col("lon").alias("longitude"))
+        df._dataframe = df._dataframe.filter(df.latitude >= -90.0).filter(df.latitude <= 90.0).filter(df.longitude >= -180.0).filter(df.longitude <= 180.0)
         return df
 
 
@@ -64,8 +61,8 @@ class LatLonTransformer(PipelineElement):
         "longitude_y": {"unit": units.deg}
     })
     def transform(self, df: AnnotatedDataFrame) -> AnnotatedDataFrame:
-        lat_cyclic_transformer = vaex.ml.CycleTransformer(features=["latitude"], n=180.0)
-        lon_cyclic_transformer = vaex.ml.CycleTransformer(features=["longitude"], n=360.0)
+        lat_cyclic_transformer = CycleTransformer(features=["latitude"], n=180.0)
+        lon_cyclic_transformer = CycleTransformer(features=["longitude"], n=360.0)
 
         _df = lat_cyclic_transformer.fit_transform(df=df)
         _df = lon_cyclic_transformer.fit_transform(df=_df)
