@@ -177,13 +177,13 @@ def create_figure_trajectory(data_df: AnnotatedDataFrame,
 
     lat_crossings = lat_crossings[lat_crossings[lat]][sequence_id_column].to_numpy()
     data_df[lat] = data_df.apply(lambda x: x[lat] + 180 if x[sequence_id_column] in lat_crossings and x[lat] < 0 else x[lat], axis=1)
-    #if ref_lat in data_df.column_names:
+    #if ref_lat in data_df.columns:
     #    data_df[ref_lat] = data_df.apply(lambda x,y: y + 180 if x in lat_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lat]])
 
     lon_crossings = lon_crossings[lon_crossings[lon]][sequence_id_column].to_numpy()
     data_df[lon] = data_df.apply(lambda x: x[lon] + 360 if x[sequence_id_column] in lon_crossings and x[lon] < 0 else x[lon], axis=1)
 
-    #if ref_lon in data_df.column_names:
+    #if ref_lon in data_df.columns:
     #    data_df[ref_lon] = data_df.apply(lambda x,y: y + 360 if x in lon_crossings and y < 0 else y, [data_df[sequence_id_column], data_df[ref_lon]])
 
     input_data = {
@@ -212,33 +212,33 @@ def create_figure_trajectory(data_df: AnnotatedDataFrame,
 
     if densities_by:
         for density_by in densities_by:
-            if density_by not in data_df.column_names:
+            if density_by not in data_df.columns:
                 continue
 
-            density_input_df = data_df.dropnan(column_names=[density_by])
+            density_input_df = data_df.dropna(subset=[density_by])
             density_input_df[density_by] = density_input_df[density_by].astype('float32')
 
             density_input_data = {
-                "sequence_id": density_input_df[sequence_id_column].evaluate(),
+                "sequence_id": density_input_df[sequence_id_column]
             }
             # Add all information to the tooltip
-            for column in data_df.column_names:
+            for column in data_df.columns:
                 if column not in [sequence_id_column] and not column.startswith("__"):
-                    density_input_data[column] = density_input_df[column].evaluate()
+                    density_input_data[column] = density_input_df[column]
 
             if use_absolute_value:
                 density_input_df[density_by] = density_input_df[density_by].abs()
 
             # 2maz
-            #scaler = vaex.ml.StandardScaler(features=[density_by])
             # this will create a column 'standard_scaled_<feature-name>'
-            #density_input_df = scaler.fit_transform(density_input_df)
             normalized_column = f"standard_scaled_{density_by}"
-
-            density_input_data[density_by] = density_input_df[density_by].evaluate()
+            mean = density_input_df[density_by].mean()
+            std_dev = density_input_df[density_by].std()
+            density_input_df[normalized_column] =  (density_input_df[density_by] - mean) / std_dev
+            density_input_data[density_by] = density_input_df[density_by]
 
             radius = []
-            for x in density_input_df[normalized_column].evaluate():
+            for x in density_input_df[normalized_column]:
                 if np.isnan(x):
                     radius.append(1)
                     continue
