@@ -3,11 +3,13 @@ import logging
 import dash
 import dash_daq as daq
 from dash import dash_table, State, dcc, Output, Input, html, ALL, MATCH, Patch
+import hashlib
 
 import dash_uploader as du
 from dash_extensions.enrich import DashLogger
 from enum import Enum
 
+import os
 import json
 from pathlib import Path
 import numpy as np
@@ -18,7 +20,9 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype, is_datetime64_ns_dtype
 from logging import WARNING
 
-from damast.core.dataframe import AnnotatedDataFrame
+from threading import Lock
+
+from damast.core.dataframe import AnnotatedDataFrame, DAMAST_SUPPORTED_FILE_FORMATS
 from ..figures import (
     create_div_histogram,
     create_div_metadata,
@@ -33,13 +37,38 @@ from ..web_application import AISApp
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
+_ANNOTATED_DATAFRAMES_CACHE = {}
+_ANNOTATED_DATAFRAMES_CACHE_MUTEX = Lock()
+
+def get_annotated_dataframe(filename: Path | str | list[str]):
+    if type(filename) != list:
+        filename = [filename]
+
+    if not filename:
+        raise ValueError("Filename list cannot be empty or None")
+
+    key = hashlib.md5(''.join(filename).encode('UTF-8'))
+
+    with _ANNOTATED_DATAFRAMES_CACHE_MUTEX:
+        if key in _ANNOTATED_DATAFRAMES_CACHE:
+            return _ANNOTATED_DATAFRAMES_CACHE[key]
+
+        logger.info(f"Trying to load: {filename}")
+        adf = AnnotatedDataFrame.from_files(files=filename, metadata_required=False)
+        _ANNOTATED_DATAFRAMES_CACHE[key] = adf
+        return adf
+
+def has_files(filename: str | list[str]):
+ return filename and filename != [] and isinstance(filename, list)
+
 class VisualizationType(str, Enum):
     Histogram = "Histogram"
     Statistics = "Statistics"
     Metadata = "Metadata"
 
 ALL_SEQUENCES_OPTION = "all"
-SUPPORTED_FILE_FORMATS: list[str] = [".parquet", ".pq", ".nc", ".netcdf", ".nc4", ".netcdf4", ".h5", ".hdf", ".hdf5"]
+SUPPORTED_FILE_FORMATS: list[str] = [x for suffixes in DAMAST_SUPPORTED_FILE_FORMATS.values() for x in suffixes]
 
 def pandas_slice(adf: AnnotatedDataFrame) -> pd.DataFrame:
    return adf.slice(offset=0, length=5).collect().to_pandas()
@@ -119,7 +148,7 @@ class ExploreTab:
             if not state_data_filename:
                 return [], True
 
-            adf = AnnotatedDataFrame.from_file(filename=state_data_filename, metadata_required=False)
+            adf = get_annotated_dataframe(filename=state_data_filename)
 
             # If a group id has been selected, then limit the visualisation to this group id
             if state_sequence_id_column and state_sequence_id and state_sequence_id != 'null':
@@ -185,8 +214,7 @@ class ExploreTab:
             if not state_data_filename:
                 return [], []
 
-
-            adf = AnnotatedDataFrame.from_file(filename=state_data_filename, metadata_required=False)
+            adf = get_annotated_dataframe(filename=state_data_filename)
             analyse_df = adf
             if state_data_columns and state_data_columns != 'null':
                 analyse_df = adf[state_data_columns]
@@ -285,7 +313,7 @@ class ExploreTab:
                 return []
 
             min_length, max_length = min_max_length
-            adf = AnnotatedDataFrame.from_file(data_filename, metadata_required=False)
+            adf = get_annotated_dataframe(data_filename)
 
             logger.info(f"Filter for {sequence_id_column=} {min_length=} {max_length=}")
             return get_selectables(adf=adf,
@@ -342,7 +370,7 @@ class ExploreTab:
                                 hidden=True)], json.dumps(None), current_data_preview, 0
 
             # per default use
-            adf = AnnotatedDataFrame.from_file(data_filename, metadata_required=False)
+            adf = get_annotated_dataframe(filename=data_filename)
             groups_df = None
 
             current_sequence_ids = []
@@ -455,8 +483,8 @@ class ExploreTab:
             """
             filename = explore_data_filename
             options = {}
-            if filename and filename != '' and isinstance(filename, str):
-                adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
+            if has_files(filename):
+                adf = get_annotated_dataframe(filename=filename)
                 for c in adf.column_names:
                     label = c
                     try:
@@ -488,10 +516,10 @@ class ExploreTab:
                 return []
 
             filename = data_filename
-            if not filename or filename == '' or not isinstance(filename, str):
+            if has_files(filename):
                 return []
 
-            adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
+            adf = get_annotated_dataframe(filename=filename)
             df = pandas_slice(adf)
 
             filter_columns_options = [{'label': c, 'value': c} for c in df.columns if is_numeric_dtype(df.dtypes[c]) or is_datetime64_ns_dtype(df.dtypes[c])]
@@ -552,10 +580,10 @@ class ExploreTab:
                     return existing_value_filter
 
             filename = explore_data_filename
-            if not value or not filename or filename == '' or not isinstance(filename, str):
+            if not value or not has_files(filename):
                 return []
 
-            adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
+            adf = get_annotated_dataframe(filename=filename)
 
             filter_id = component_id['filter_id']
             dtype = pandas_slice(adf).dtypes[value]
@@ -687,10 +715,10 @@ class ExploreTab:
                 return [], [], None, None
 
             filename = explore_data_filename
-            if not filename or filename == '' or not isinstance(filename, str) or explore_sequence_id_column is None:
+            if not has_files(filename) or explore_sequence_id_column is None:
                 return state_data_preview, state_prediction_sequence_id_selection, False, True
 
-            adf = AnnotatedDataFrame.from_file(filename=filename, metadata_required=False)
+            adf = get_annotated_dataframe(filename=filename)
             data_preview_table = create_figure_data_preview_table(adf.dataframe)
 
             select_sequence_id_dropdown = dcc.Dropdown(
@@ -876,7 +904,7 @@ class ExploreTab:
             dcc.Dropdown(id={'component_id': "explore-datasets-dropdown"},
                          options={ str(x): x.name for  x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file() and x.suffix in SUPPORTED_FILE_FORMATS},
                          placeholder="Select a dataset",
-                         multi=False)],
+                         multi=True)],
             style={
                 "display": "inline-block",
                 "width": "100%",
@@ -923,15 +951,15 @@ class ExploreTab:
                            html.Br(),
                            html.Div(id='explore-upload',
                                     children=[du.Upload(
-                                        text="Drag and drop to upload dataset",
+                                        text="Drag and drop to upload dataset(s)",
                                         text_completed='',
                                         id='explore-dataset-upload',
                                         max_file_size=10000, # 10 000 Mb,
                                         cancel_button=True,
                                         pause_button=True,
-                                        filetypes=['parquet', 'netcdf', 'h5', 'hdf5'],
+                                        filetypes=[x[1:] for x in SUPPORTED_FILE_FORMATS],
                                         upload_id='datasets',
-                                        max_files=1,
+                                        max_files=20,
                                     ),
                                     ],
                                     style={

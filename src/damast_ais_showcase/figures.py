@@ -52,10 +52,9 @@ def create_figure_histogram(x, counts, title=None, xlabel=None, ylabel=None):
 
 
 def create_div_histogram(adf: AnnotatedDataFrame, column_name: str) -> go.Figure:
-    data_df = adf._dataframe
 
     histograms = []
-    col = data_df[column_name]
+    col = adf[column_name]
     if col.dtype == np.float16:
         col = col.astype('float32')
 
