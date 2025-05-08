@@ -33,7 +33,7 @@ dependencies = [
     "numpy",
     "damast",
     "dash[diskcache]>=2.10",
-    "dash-extensions",
+    "dash-extensions<2",
     "dash-mantine-components",
     "dash-daq",
     "dash-uploader>=0.7.0a1",
