@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-_ANNOTATED_DATAFRAMES_CACHE = {}
 _ANNOTATED_DATAFRAMES_CACHE_MUTEX = Lock()
 
 def get_annotated_dataframe(filename: Path | str | list[str]):
@@ -48,15 +47,21 @@ def get_annotated_dataframe(filename: Path | str | list[str]):
     if not filename:
         raise ValueError("Filename list cannot be empty or None")
 
-    key = hashlib.md5(''.join(filename).encode('UTF-8'))
+    key = hashlib.md5(''.join(filename).encode('UTF-8')).hexdigest()
+    cache_dir = Path("/tmp/damast-ais-showcase/datasets-cache/")
+    cache_file = cache_dir / f"{key}.parquet"
 
     with _ANNOTATED_DATAFRAMES_CACHE_MUTEX:
-        if key in _ANNOTATED_DATAFRAMES_CACHE:
-            return _ANNOTATED_DATAFRAMES_CACHE[key]
-
-        logger.info(f"Trying to load: {filename}")
-        adf = AnnotatedDataFrame.from_files(files=filename, metadata_required=False)
-        _ANNOTATED_DATAFRAMES_CACHE[key] = adf
+        if not cache_file.exists():
+            logger.info(f"Trying to load: {filename}")
+            adf = AnnotatedDataFrame.from_files(files=filename, metadata_required=False)
+            logger.info(f"Successfully loaded: {filename}")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Caching: {filename} as {cache_file}")
+            adf.save(filename=cache_file)
+        else:
+            logger.info(f"Trying to load from cache: {cache_file}")
+            adf = AnnotatedDataFrame.from_files(files=[cache_file], metadata_required=False)
         return adf
 
 def has_files(filename: str | list[str]):
@@ -111,10 +116,15 @@ class ExploreTab:
 
         @du.callback(
             Output({'component_id': 'explore-datasets-dropdown'}, 'options'),
-            id='explore-dataset-upload'
+            id='explore-dataset-upload',
         )
         def upload(status: du.UploadStatus):
-            return { str(x): x.name for x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file() and x.suffix in SUPPORTED_FILE_FORMATS}
+            datasets = { str(x): x.name for x in (Path(app.data_upload_path) / "datasets").glob("*") if x.is_file() and x.suffix in SUPPORTED_FILE_FORMATS}
+            for dataset, name in datasets.items():
+                # Loading
+                get_annotated_dataframe(dataset)
+            return datasets
+
 
         @app.callback(
             Output('explore-dataset', 'children'),
@@ -516,7 +526,7 @@ class ExploreTab:
                 return []
 
             filename = data_filename
-            if has_files(filename):
+            if not has_files(filename):
                 return []
 
             adf = get_annotated_dataframe(filename=filename)
