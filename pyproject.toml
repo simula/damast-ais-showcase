@@ -31,6 +31,7 @@ classifiers = [
 
 dependencies = [
     "numpy",
+    "pandas",
     "damast",
     "dash[diskcache]>=2.10",
     "dash-extensions<2",
