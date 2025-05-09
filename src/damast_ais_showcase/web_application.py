@@ -135,7 +135,7 @@ class AISApp(WebApplication):
                 # Control showing of control
                 html.Div(id="tab-spacer",
                          style={
-                             "height": "2em"
+                             "height": "2em",
                          }),
                 dcc.Tabs([
                     ExploreTab.create(app=self),
@@ -144,5 +144,9 @@ class AISApp(WebApplication):
                     # Start with the second tab
                     #value="tab-explore"
                 )
-            ])
+            ],
+            style={
+                 "margin-left": "2em",
+                 "margin-right": "2em",
+            })
         ]
